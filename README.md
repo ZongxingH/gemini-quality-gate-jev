@@ -17,6 +17,9 @@ Jev 不生成代码；它只负责质量门决策。Jev 请求失败时 Hook 会
    chmod 600 ~/.config/typesafe/jev.env
    ```
 
+   设置了 `XDG_CONFIG_HOME` 时，hook 会优先读取 `$XDG_CONFIG_HOME/typesafe/jev.env`。
+   也可以直接运行 [`install.sh`](install.sh)，它会替你完成这一步。
+
 3. 从本目录启动 Gemini CLI：
 
    ```bash
@@ -42,8 +45,64 @@ printf '%s' '{"hook_event_name":"AfterAgent","cwd":".","prompt":"修复登录接
 
 - `TYPESAFE_API_URL`：覆盖 JEV API 地址，默认 `https://api.typesafe.ai/v1/systemone`。
 - `TYPESAFE_MODEL`：默认 `jev-latest`。
-- `JEV_HOOK_TIMEOUT_SECONDS`：JEV 请求超时，默认 8 秒。
+- `JEV_HOOK_TIMEOUT_SECONDS`：JEV 请求超时，默认 5 秒（hooks.json 的命令超时是 10 秒，两次 git 摘要各 1.5 秒，留有余量）。
 
 当前只有 `needs_retry >= 0.85` 才会拒绝结果并触发 Gemini 自动重试；`stop_hook_active` 为真时会直接放行，防止无限重试。
 
 # gemini-quality-gate-jev
+
+## 从 Git 仓库安装
+
+> ⚠️ 先推送扩展文件：远程仓库的 `main` 目前只有最初提交，还不包含 `gemini-extension.json` / `hooks/` / `install.sh`。
+> 未推送前，从 Git 安装会以 `Configuration file not found … gemini-extension.json` 失败。
+
+```bash
+git add gemini-extension.json hooks install.sh scripts README.md
+git commit -m "Package as a Gemini CLI extension"
+git push origin main
+```
+
+仓库提供了 [`install.sh`](install.sh) 安装脚本：隐藏读取 `TYPESAFE_API_KEY`，保存到用户目录的 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600），不会写入仓库或 Gemini 配置文件。
+
+全局安装（当前用户的所有项目）：
+
+```bash
+git clone https://github.com/ZongxingH/gemini-quality-gate-jev.git
+cd gemini-quality-gate-jev
+./install.sh --global
+```
+
+只安装到指定项目（扩展装在用户目录，但只在该项目启用）：
+
+```bash
+./install.sh --project /path/to/your/project
+```
+
+指定其他仓库或版本，或在 CI 中非交互执行：
+
+```bash
+./install.sh --global --repo https://github.com/ZongxingH/gemini-quality-gate-jev.git --ref main
+TYPESAFE_API_KEY=... ./install.sh --project "$PWD"
+./install.sh --global --api-key-file ~/keys/jev.env
+```
+
+其他选项：
+
+```bash
+./install.sh --global --dry-run     # 只打印将执行的命令
+./install.sh --uninstall            # 卸载扩展（保留密钥）
+./install.sh --uninstall --purge-key
+./install.sh --help
+```
+
+要点：
+
+- 密钥来源优先级：`--api-key` > `--api-key-file` > 环境变量 `TYPESAFE_API_KEY` > 隐藏交互输入。
+- 脚本会代你同意 Gemini CLI 的扩展安装提示（`--consent`），并仅为这一条命令设置 `GEMINI_CLI_TRUST_WORKSPACE=true`，不会改动你的 `~/.gemini/trustedFolders.json`。
+- 项目安装会先关闭用户范围启用，再只为目标项目启用；`$HOME` 之外的项目无法被 CLI 限制，脚本会给出警告。
+- 安装后可能提示 “TypeSafe API key” 扩展设置缺失，这是预期行为：hook 直接读取上面的密钥文件。
+- 若同时保留本仓库 `.gemini/settings.json` 的项目级 hook，同一轮会触发两次判定；安装扩展后请二选一。
+- 完整能力与验证记录见 [`ANALYSIS.md`](ANALYSIS.md)。
+
+安装完成后需要重启 Gemini CLI。
+

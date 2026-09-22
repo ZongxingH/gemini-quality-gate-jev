@@ -1,0 +1,13 @@
+{
+  "name": "gemini-quality-gate-jev",
+  "version": "0.1.0",
+  "description": "Use TypeSafe Jev as a quality gate for Gemini CLI agent responses.",
+  "settings": [
+    {
+      "name": "TypeSafe API key",
+      "description": "API key used to call TypeSafe Jev.",
+      "envVar": "TYPESAFE_API_KEY",
+      "sensitive": true
+    }
+  ]
+}

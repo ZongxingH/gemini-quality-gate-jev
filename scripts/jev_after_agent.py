@@ -20,7 +20,10 @@ from typing import Any
 
 JEV_URL = os.environ.get("TYPESAFE_API_URL", "https://api.typesafe.ai/v1/systemone")
 JEV_MODEL = os.environ.get("TYPESAFE_MODEL", "jev-latest")
-TIMEOUT_SECONDS = float(os.environ.get("JEV_HOOK_TIMEOUT_SECONDS", "8"))
+# The hook itself is bounded by hooks.json (10s). Keep the HTTP budget small so
+# that the two best-effort git calls below still fit inside that window.
+TIMEOUT_SECONDS = float(os.environ.get("JEV_HOOK_TIMEOUT_SECONDS", "5"))
+GIT_TIMEOUT_SECONDS = 1.5
 MAX_TEXT = 12000
 
 
@@ -56,7 +59,7 @@ def git_context(cwd: str) -> dict[str, str]:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=2,
+                timeout=GIT_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -67,13 +70,17 @@ def git_context(cwd: str) -> dict[str, str]:
 
 def load_api_key() -> str | None:
     # Direct environment lookup is useful for manual tests. Gemini CLI command
-    # hooks run with a sanitized environment, so production use falls back to
-    # a user-owned file outside the repository.
+    # hooks run with a sanitized environment (any name matching /KEY/i is
+    # redacted), so production use falls back to a user-owned file outside the
+    # repository.
     direct = os.environ.get("TYPESAFE_API_KEY")
     if direct:
         return direct
 
+    # Keep this list in sync with install.sh --key-file.
+    config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     candidates = [
+        Path(config_home) / "typesafe" / "jev.env",
         Path.home() / ".config" / "typesafe" / "jev.env",
         Path.home() / ".config" / "jev" / ".env",
     ]
@@ -171,11 +178,17 @@ def main() -> None:
         allow("JEV unavailable; response was allowed without the quality gate")
         return
 
-    answers = response.get("answers", {})
-    retry_answer = answers.get("needs_retry", {})
-    retry_probability = float(retry_answer.get("noul", 0.0) or 0.0)
-    risk_answer = answers.get("risk", {})
-    risk_score = risk_answer.get("score")
+    try:
+        answers = response.get("answers", {})
+        retry_answer = answers.get("needs_retry", {})
+        retry_probability = float(retry_answer.get("noul", 0.0) or 0.0)
+        risk_answer = answers.get("risk", {})
+        risk_score = risk_answer.get("score")
+    except (AttributeError, TypeError, ValueError) as error:
+        # An unexpected payload shape must not block Gemini CLI.
+        print(f"JEV returned an unexpected payload; allowing: {error}", file=sys.stderr)
+        allow("JEV unavailable; response was allowed without the quality gate")
+        return
 
     if retry_probability >= 0.85:
         reason = (
