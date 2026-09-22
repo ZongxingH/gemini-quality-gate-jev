@@ -1,105 +1,128 @@
-# Gemini CLI + Jev AfterAgent Hook
-
-这是一个最小的 Gemini CLI Hook：Gemini 完成一轮工作后，Hook 把用户请求、最终回答和 Git 工作区摘要交给 Jev 做两个结构化判断：是否需要再修正一次，以及变更风险等级。
-
-Jev 不生成代码；它只负责质量门决策。Jev 请求失败时 Hook 会放行，避免网络或服务问题阻塞 Gemini CLI。
-
-## 启用
-
-1. 在 TypeSafe Console 创建 API key。
-2. 把 key 保存到用户目录（不要放进仓库）。Gemini CLI 的 Hook 运行在精简环境中，使用下面的隐藏输入方式创建权限为 600 的文件：
-
-   ```bash
-   mkdir -p ~/.config/typesafe
-   read -r -s JEV_KEY
-   printf 'TYPESAFE_API_KEY=%s\n' "$JEV_KEY" > ~/.config/typesafe/jev.env
-   unset JEV_KEY
-   chmod 600 ~/.config/typesafe/jev.env
-   ```
-
-   设置了 `XDG_CONFIG_HOME` 时，hook 会优先读取 `$XDG_CONFIG_HOME/typesafe/jev.env`。
-   也可以直接运行 [`install.sh`](install.sh)，它会替你完成这一步。
-
-3. 从本目录启动 Gemini CLI：
-
-   ```bash
-   gemini
-   ```
-
-项目级配置位于 `.gemini/settings.json`，Hook 实现位于 `scripts/jev_after_agent.py`。配置使用 Gemini CLI 提供的 `GEMINI_PROJECT_DIR`，因此从项目根目录或子目录启动都可以。
-
-## 手动测试 Hook
-
-不启动 Gemini，也可以用一条模拟事件验证 Hook 的 JSON 输入/输出协议：
-
-```bash
-printf '%s' '{"hook_event_name":"AfterAgent","cwd":".","prompt":"修复登录接口","prompt_response":"已修改代码，但没有运行测试","stop_hook_active":false}' \
-  | python3 scripts/jev_after_agent.py
-```
-
-未设置 API key 文件时应当看到 `decision: allow`，并提示 JEV 被跳过。手动测试时也可以临时使用 `TYPESAFE_API_KEY=... python3 scripts/jev_after_agent.py`。
-
-## 调整策略
-
-环境变量：
-
-- `TYPESAFE_API_URL`：覆盖 JEV API 地址，默认 `https://api.typesafe.ai/v1/systemone`。
-- `TYPESAFE_MODEL`：默认 `jev-latest`。
-- `JEV_HOOK_TIMEOUT_SECONDS`：JEV 请求超时，默认 5 秒（hooks.json 的命令超时是 10 秒，两次 git 摘要各 1.5 秒，留有余量）。
-
-当前只有 `needs_retry >= 0.85` 才会拒绝结果并触发 Gemini 自动重试；`stop_hook_active` 为真时会直接放行，防止无限重试。
-
 # gemini-quality-gate-jev
 
-## 从 Git 仓库安装
+给 Gemini CLI 装一个「质量门」：每轮回答结束后，用 [TypeSafe Jev](https://typesafe.ai/) 判断这次交付是否还缺关键步骤，缺就让 Gemini 自动再改一轮。
 
-无需先克隆仓库：直接把 `install.sh` 跑起来，或按下面的示例克隆后再运行。脚本会把扩展从 Git 仓库安装到用户目录，并把 `TYPESAFE_API_KEY` 保存到 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600），不会写入仓库或 Gemini 配置文件。
+Jev 在这里只回答两个结构化判断（要不要返工、风险多高），不生成任何代码或文字。
 
-一行安装（不落仓库，脚本自己从 Git 拉取扩展）：
+## 它做什么
+
+Gemini 完成一轮回答时（`AfterAgent` 事件），扩展把三样东西交给 Jev：
+
+| 交给 Jev 的内容 | 说明 |
+| --- | --- |
+| 用户请求 | 这一轮要 Gemini 做什么 |
+| 最终回答 | Gemini 这一轮的交付说明 |
+| 工作区摘要 | `git status --short` 与 `git diff --stat` |
+
+Jev 返回两个判断：
+
+- **`needs_retry`**：这轮回答有没有必须补上的遗漏（0–1 的概率）
+- **`risk`**：这次变更的风险等级（分数）
+
+当 `needs_retry >= 0.85` 时，扩展会**打回这轮结果**，让 Gemini 带着「复查需求、跑验证、给出证据」的要求自动再答一轮；只补一轮，不会无限重试。其余情况直接放行。
+
+**异常一定放行**：没配 API key、网络不通、Jev 超时或返回异常，扩展都会放行，不会把 Gemini CLI 卡住。
+
+## 前置条件
+
+- Gemini CLI **0.60 或更高**
+- **Python 3**（hook 用系统 `python3` 执行）
+- 一个 **TypeSafe Jev API key**，在 <https://console.typesafe.ai/settings/keys> 创建
+- git（可选：用于采集工作区摘要，不在 git 仓库时会自动跳过）
+
+## 安装
+
+一条命令（当前用户的所有项目都启用）：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global
 ```
 
-克隆后本地运行：
+只给某个项目启用：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --project /path/to/your/project
+```
+
+> 扩展文件装在用户目录（Gemini CLI 只从 `~/.gemini/extensions` 加载扩展），但只在这个项目里启用，其他项目不受影响。
+
+克隆后本地运行、锁定版本，或在 CI 里非交互执行：
 
 ```bash
 git clone https://github.com/ZongxingH/gemini-quality-gate-jev.git
 cd gemini-quality-gate-jev
+
 ./install.sh --global
-```
-
-只安装到指定项目（扩展装在用户目录，但只在该项目启用）：
-
-```bash
-./install.sh --project /path/to/your/project
-```
-
-指定其他仓库或版本，或在 CI 中非交互执行：
-
-```bash
 ./install.sh --global --repo https://github.com/ZongxingH/gemini-quality-gate-jev.git --ref main
 TYPESAFE_API_KEY=... ./install.sh --project "$PWD"
 ./install.sh --global --api-key-file ~/keys/jev.env
 ```
 
-其他选项：
+安装脚本会：
+
+1. 读取 `TYPESAFE_API_KEY`（优先级：`--api-key` > `--api-key-file` > 环境变量 > 隐藏交互输入），写入 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600，不会进仓库）；
+2. 从 Git 仓库安装扩展；
+3. 按 `--global` / `--project` 设置启用范围；
+4. 用 `gemini extensions list -o json` 复核扩展是否真的启用。
+
+安装完**重启 Gemini CLI**，然后验证：
 
 ```bash
-./install.sh --global --dry-run     # 只打印将执行的命令
-./install.sh --uninstall            # 卸载扩展（保留密钥）
-./install.sh --uninstall --purge-key
-./install.sh --help
+gemini extensions list        # 应看到 gemini-quality-gate-jev，且为 enabled
 ```
 
-要点：
+## 使用
 
-- 密钥来源优先级：`--api-key` > `--api-key-file` > 环境变量 `TYPESAFE_API_KEY` > 隐藏交互输入。
-- 脚本会代你同意 Gemini CLI 的扩展安装提示（`--consent`），并仅为这一条命令设置 `GEMINI_CLI_TRUST_WORKSPACE=true`，不会改动你的 `~/.gemini/trustedFolders.json`。
-- 项目安装会先关闭用户范围启用，再只为目标项目启用；`$HOME` 之外的项目无法被 CLI 限制，脚本会给出警告。
-- 安装后可能提示 “TypeSafe API key” 扩展设置缺失，这是预期行为：hook 直接读取上面的密钥文件。
-- 若同时保留本仓库 `.gemini/settings.json` 的项目级 hook，同一轮会触发两次判定；安装扩展后请二选一。
-- 完整能力与验证记录见 [`ANALYSIS.md`](ANALYSIS.md)。
+重启后不需要额外操作，正常使用 `gemini` 即可：
 
-安装完成后需要重启 Gemini CLI。
+- **判定通过**：直接通过，不影响回答；
+- **判定需要修正**：你会看到 `JEV requested a correction pass …`，Gemini 会自动再答一轮，并在这一轮里复查需求、运行验证、给出证据；
+- **Jev 不可用或没配 key**：正常回答，只是没有质量门（会在提示里说明原因）。
 
+想看它是否在工作，可以在任意目录跑一条模拟事件：
+
+```bash
+printf '%s' '{"hook_event_name":"AfterAgent","cwd":".","prompt":"修复登录接口","prompt_response":"已修改代码，但没有运行测试","stop_hook_active":false}' \
+  | python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_after_agent.py
+```
+
+没配 key 时会输出 `decision: allow` 并提示 Jev 被跳过；配了 key 就会真实访问 Jev 并给出判定。
+
+## 配置
+
+用环境变量调整（写在 shell profile 或 Gemini 的运行环境里）：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TYPESAFE_API_KEY` | 无 | API key；未设置时读取 `~/.config/typesafe/jev.env` |
+| `TYPESAFE_API_URL` | `https://api.typesafe.ai/v1/systemone` | Jev API 地址 |
+| `TYPESAFE_MODEL` | `jev-latest` | 使用的 Jev 模型 |
+| `JEV_HOOK_TIMEOUT_SECONDS` | `5` | 单次 Jev 请求的超时（秒） |
+
+判定策略目前是固定的：`needs_retry >= 0.85` 才打回重做，重做后的那一轮不再二次打回。
+
+## 更新与卸载
+
+```bash
+./install.sh --global                  # 重新运行即更新到仓库最新版本
+./install.sh --uninstall               # 卸载扩展，保留密钥文件
+./install.sh --uninstall --purge-key   # 卸载扩展并删除密钥文件
+./install.sh --global --dry-run        # 只打印将要执行的命令
+./install.sh --help                    # 全部选项
+```
+
+## 手动配置密钥
+
+不使用安装脚本时，可以自己写入密钥文件：
+
+```bash
+mkdir -p ~/.config/typesafe
+read -r -s JEV_KEY
+printf 'TYPESAFE_API_KEY=%s\n' "$JEV_KEY" > ~/.config/typesafe/jev.env
+unset JEV_KEY
+chmod 600 ~/.config/typesafe/jev.env
+```
+
+## 数据与隐私
+
+启用后，每一轮回答结束都会把**用户请求、Gemini 的最终回答、git 工作区摘要**发送到 `api.typesafe.ai`。在敏感仓库中使用前，请先确认这符合你的合规要求。
