@@ -51,41 +51,49 @@ Jev 只回答判断，不生成代码或文字。安装时自己选要挂哪几�
 
 ## 安装
 
-不用克隆仓库，也不用本地先有安装脚本。**第一条命令把安装器定义成 `jev`，之后所有操作都只用 `jev`。**
+不用克隆仓库，也不用本地先有安装脚本：
 
 ```bash
-jev() { curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh -o /tmp/jev-install.sh && bash /tmp/jev-install.sh "$@"; }
-
-jev --global
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global
 ```
 
-（换一个终端窗口后重新执行第一条即可；想长期保留就把它写进 `~/.zshrc` 或 `~/.bashrc`。）
-
-`jev --global` 会先问你密钥（隐藏输入），再出现选门菜单：
-
-```
-Which Jev gates should be active? Choose one or more.
-
-  1) AfterAgent    after each answer: ask Jev whether one correction pass is needed
-  2) BeforeTool    before a tool runs: block or confirm destructive commands and secret exposure
-  3) BeforeAgent   before each request: refuse unsafe asks, nudge broad ones to plan first
-  4) SessionStart  at session start: inject a verification advisory for risky repos
-
-Numbers separated by spaces or commas, or "all" [default: 1 = AfterAgent]:
-```
-
-输入 `2 3`、`AfterAgent,BeforeTool`、`all` 都可以；直接回车默认只挂 AfterAgent。**至少要选一个。**
-
-常用组合：
+上面这条是全局启用 + 交互选门；要一次指定门、指定项目或完全不交互，就在后面接着加参数：
 
 ```bash
-jev --global                                   # 全局启用，交互选门
-jev --global --events all                      # 四个门全开，不问
-jev --global --events AfterAgent,BeforeTool    # 只要返工门 + 工具拦截门
-jev --project /path/to/project                 # 只在这个项目启用
-jev --global --events all --api-key-file ~/keys/jev.env   # 全程不交互（CI）
-jev --help                                     # 全部选项
+# 四个门全开
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global --events all
+
+# 只要返工门 + 工具拦截门
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global --events AfterAgent,BeforeTool
+
+# 只给某个项目启用
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --project /path/to/project --events BeforeTool,SessionStart
+
+# 全程不交互（key 直接给，CI 用）
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global --events all --api-key ts_xxxxxxxx
+
+# 全程不交互（key 从文件读）
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global --events all --api-key-file ~/keys/jev.env
 ```
+
+参数说明：
+
+| 参数 | 取值 | 说明 |
+| --- | --- | --- |
+| `--global` | — | 当前用户的所有项目都启用 |
+| `--project PATH` | 项目目录路径 | 只在该项目启用（与 `--global` 二选一，不写默认 `--global`） |
+| `--events LIST` | `AfterAgent`、`BeforeTool`、`BeforeAgent`、`SessionStart` | 挂哪几个门。可多选，逗号或空格分隔；也可写序号 `1`–`4`、或 `all`。不写则交互选择，直接回车 = 只挂 `AfterAgent`。**至少要有一个** |
+| `--repo URL` | Git 仓库地址，或本地目录 | 默认官方仓库；本地目录时不支持 `--ref` |
+| `--ref REF` | 分支 / tag / commit | 只对 Git 源有效 |
+| `--api-key KEY` | TypeSafe Jev key | 不写则交互隐藏输入（key 会留在 shell 历史里，CI 更推荐下面两种） |
+| `--api-key-file PATH` | 文件路径 | 文件内容是裸 key，或一行 `TYPESAFE_API_KEY=...` |
+| `--key-file PATH` | 文件路径 | key 的保存位置，默认 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env` |
+| `--dry-run` | — | 只打印将要执行的命令，不做任何改动 |
+| `--uninstall` | — | 卸载扩展，保留密钥和门配置 |
+| `--purge-key` | 配合 `--uninstall` | 连密钥和门配置一起删除 |
+| `-h, --help` | — | 列出全部选项 |
+
+密钥也可以直接用环境变量给：`TYPESAFE_API_KEY=ts_xxx bash <(curl -fsSL …) --global`。
 
 安装脚本会：读密钥 → 写入 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600，不进仓库）→ 从 Git 仓库安装扩展 → 把门的选择写进 `…/typesafe/jev.json` → 按选择裁剪已安装的 `hooks/hooks.json` → 按 `--global`/`--project` 设置启用范围 → 用 `gemini extensions list -o json` 复核。
 
@@ -188,13 +196,17 @@ python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_hook.py --print
 
 ## 更新与卸载
 
-还是用同一个 `jev`（它每次都会重新下载最新脚本）：
+同样的命令，换参数：
 
 ```bash
-jev --global --events all      # 更新扩展并重设门
-jev --uninstall                # 卸载扩展，保留密钥和门配置
-jev --uninstall --purge-key    # 连同密钥和门配置一起删除
-jev --dry-run --global         # 只打印将要执行的命令，不做任何改动
+# 更新到最新版本并重设门
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global --events all
+
+# 卸载扩展，保留密钥和门配置
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --uninstall
+
+# 卸载并删除密钥和门配置
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --uninstall --purge-key
 ```
 
 ## 数据与隐私
