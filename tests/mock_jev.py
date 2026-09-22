@@ -17,12 +17,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 #: Answers that make every gate react, handy for end-to-end checks.
 LOUD_ANSWERS: dict = {
     "needs_retry": {"noul": 0.95},
-    "risk": {"score": 1.0},
-    "danger": {"score": 3.0},
+    "risk": {"score": 1.0, "confidence": 0.9},
+    "danger": {
+        "score": 3.0,
+        "confidence": 0.92,
+        "probabilities": {"0": 0.0, "1": 0.02, "2": 0.08, "3": 0.9},
+    },
     "secret_exposure": {"noul": 0.1},
     "policy_violation": {"noul": 0.0},
     "needs_plan": {"noul": 0.1},
-    "repo_risk": {"score": 0.5},
+    "repo_risk": {"score": 0.5, "confidence": 0.9},
     "verification_burden": {"noul": 0.1},
 }
 

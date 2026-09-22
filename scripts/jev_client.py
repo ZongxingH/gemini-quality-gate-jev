@@ -57,6 +57,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "before_agent_plan_notice": 0.6,
         # SessionStart: 0..3 repository risk score.
         "session_notice": 1.5,
+        "session_burden_notice": 0.8,
     },
     "before_tool": {
         # "open" keeps the session usable when Jev is unreachable; "closed"
@@ -92,6 +93,39 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Print a one-line summary when the AfterAgent gate passes.
         "after_agent_pass": True,
     },
+    # Decision policy, following the TypeSafe "confidence-gated routing" pattern:
+    # high confidence acts, medium escalates to the human, low confidence does
+    # not act at all. See https://docs.typesafe.ai/patterns/confidence-routing
+    "policy": {
+        # Per-gate stance:
+        #   auto      - thresholds decide; never ask the human
+        #   escalate  - the uncertain band asks the human (official pattern)
+        #   advisory  - never block; keep the signal visible instead
+        "gates": {
+            "AfterAgent": "auto",
+            "BeforeTool": "escalate",
+            "BeforeAgent": "advisory",
+            "SessionStart": "advisory",
+        },
+        # Global confidence floor. Below it the model is telling us it cannot
+        # answer reliably, so the decision escalates instead of acting.
+        "confidence_floor": 0.6,
+        # A high-stakes action only happens automatically above this confidence.
+        "auto_act_confidence": 0.85,
+        # Noul answers carry no confidence of their own, so the band between
+        # this value and the action threshold is treated as "gather more
+        # information" rather than a hard cut.
+        "uncertain_low": 0.5,
+        # auto | always | never - whether a human can be asked at all.
+        "assume_human": "auto",
+        # deny | allow - what to do when the uncertain band needs a human and
+        # none is reachable (CI, gemini -p, sandboxed runs).
+        "ask_fallback": "deny",
+    },
+    # Append every decision (with Jev's probabilities) to
+    # ~/.config/typesafe/jev-decisions.jsonl so thresholds can be calibrated
+    # from real traffic later.
+    "log_decisions": False,
 }
 
 
@@ -354,3 +388,66 @@ def score(answers: dict[str, Any], name: str) -> float:
         return float(value)
     except (TypeError, ValueError) as error:
         raise JevError(f"answer '{name}' is not a score") from error
+
+
+def confidence(answers: dict[str, Any], name: str) -> float | None:
+    """Read the answer's confidence (Score/Choice only).
+
+    ``None`` means the answer did not carry one - Noul answers never do, and an
+    older deployment may not either. Callers fall back to a value-only decision
+    in that case.
+    """
+    entry = answers.get(name)
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("confidence")
+    if value is None:
+        return None
+    try:
+        return min(1.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def probabilities(answers: dict[str, Any], name: str) -> dict[str, float]:
+    """Read the full probability distribution of a Score/Choice answer.
+
+    TypeSafe returns this so a caller can replace the built-in ``confidence``
+    with a measure of their own; the decision log records it for calibration.
+    """
+    entry = answers.get(name)
+    if not isinstance(entry, dict):
+        return {}
+    raw = entry.get("probabilities")
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            result[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def decision_log_path() -> Path:
+    return config_home() / "typesafe" / "jev-decisions.jsonl"
+
+
+def log_decision(gate: str, verdict: str, details: dict[str, Any], config: dict[str, Any]) -> None:
+    """Append one JSONL record per decision (best effort, never raises)."""
+    if not config.get("log_decisions"):
+        return
+    try:
+        path = decision_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "gate": gate,
+            "verdict": verdict,
+            "mode": (config.get("policy") or {}).get("gates", {}).get(gate),
+            **details,
+        }
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        return

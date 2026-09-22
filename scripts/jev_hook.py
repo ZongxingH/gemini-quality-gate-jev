@@ -5,19 +5,34 @@ One script serves every selected hook event. It reads the hook payload from
 stdin, dispatches on ``hook_event_name``, and prints exactly one JSON object on
 stdout (or nothing when the event is not selected).
 
-Design rules:
+The decision layer follows TypeSafe's recommended pattern
+(https://docs.typesafe.ai/patterns/confidence-routing):
 
-* One event, one Jev question set, one bounded decision.
-* Fail open: an unreachable or confused Jev must never make Gemini CLI
-  unusable. ``BeforeTool`` can opt into fail-closed via ``before_tool.fail_mode``.
-* No code or prose generation: hooks only allow, deny, ask the user, or inject
-  a short advisory context.
+* **high confidence** - act automatically (allow or deny);
+* **medium confidence / high stakes** - escalate: ask the human to confirm, or
+  gather more information before acting;
+* **low confidence** - do not act on the model's read (a score below the
+  confidence floor cannot trigger an automatic deny).
+
+Noul answers carry no confidence of their own, so a configurable band below the
+action threshold is treated as "gather more information" instead of a hard cut
+(https://docs.typesafe.ai/confidence).
+
+Every gate declares its stance in ``policy.gates``:
+
+* ``auto``     - thresholds decide; the human is never asked;
+* ``escalate`` - the uncertain band asks the human (BeforeTool by default);
+* ``advisory`` - never block; keep the signal visible instead.
+
+Fail-open stays the default: an unreachable Jev never makes Gemini CLI
+unusable. ``BeforeTool`` can opt into fail-closed via ``before_tool.fail_mode``.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,10 +43,13 @@ from jev_client import (  # noqa: E402  (path setup must run first)
     JevError,
     ask_jev,
     clip,
+    confidence,
     configure,
     git_context,
     load_api_key,
+    log_decision,
     noul,
+    probabilities,
     repo_snapshot,
     score,
     selected_events,
@@ -48,12 +66,57 @@ RETRY_REASON = (
     "return the corrected result with concrete evidence."
 )
 
+VERIFY_REASON = (
+    "JEV is not confident this answer is complete. Before finishing, state what "
+    "you verified, run the single most relevant check, and correct anything it "
+    "exposes. Do not claim success without evidence."
+)
+
 PLAN_CONTEXT = (
     "JEV pre-flight note: this request looks broad enough to need an explicit "
     "plan. State the steps, make the smallest change that satisfies the "
     "request, run the relevant verification, and report the result with "
     "evidence. Do not claim success without running something."
 )
+
+CAUTION_CONTEXT = (
+    "JEV pre-flight note: this request may ask for something unsafe (secret "
+    "access, destructive action, or bypassing review). If it does, refuse that "
+    "part and explain why instead of complying."
+)
+
+SESSION_CONTEXT = (
+    "JEV session pre-flight: this repository needs deliberate verification. "
+    "Prefer small changes, run the project's tests or verification commands, "
+    "and state explicitly what you verified. Do not touch credentials, "
+    "production data, or deployment configuration unless asked."
+)
+
+UNVERIFIED_REASON = (
+    "JEV could not verify this step with enough confidence and no human "
+    "confirmation is available, so it was blocked. Propose a safer alternative, "
+    "or ask the user how to proceed."
+)
+
+
+# --------------------------------------------------------------------------
+# Decision plumbing
+# --------------------------------------------------------------------------
+
+def allow_decision(message: str | None = None, details: dict | None = None) -> dict:
+    return {"kind": "allow", "message": message, "details": details or {}}
+
+
+def deny_decision(reason: str, message: str | None = None, details: dict | None = None) -> dict:
+    return {"kind": "deny", "reason": reason, "message": message, "details": details or {}}
+
+
+def ask_decision(message: str, details: dict | None = None) -> dict:
+    return {"kind": "ask", "message": message, "details": details or {}}
+
+
+def context_decision(context: str, message: str | None = None, details: dict | None = None) -> dict:
+    return {"kind": "context", "context": context, "message": message, "details": details or {}}
 
 
 def allow_payload(message: str | None = None) -> dict[str, Any]:
@@ -71,7 +134,7 @@ def deny_payload(reason: str, message: str | None = None) -> dict[str, Any]:
 
 
 def ask_payload(message: str) -> dict[str, Any]:
-    # BeforeTool: force the user confirmation dialog for medium-risk calls.
+    # BeforeTool: force the user confirmation dialog.
     return {"decision": "ask", "systemMessage": message}
 
 
@@ -82,18 +145,104 @@ def context_payload(context: str, message: str | None = None) -> dict[str, Any]:
     return payload
 
 
+def gate_mode(config: dict[str, Any], gate: str) -> str:
+    gates = (config.get("policy") or {}).get("gates") or {}
+    mode = str(gates.get(gate, "auto")).lower()
+    return mode if mode in ("auto", "escalate", "advisory") else "auto"
+
+
+def human_available(policy: dict[str, Any]) -> bool:
+    """Whether the uncertain band may escalate to a human.
+
+    ``auto`` probes the controlling terminal: the hook only escalates when it
+    can actually reach a terminal. Headless and CI runs therefore fall back to
+    ``ask_fallback`` deterministically; sandboxed runs can force either answer
+    with ``assume_human`` or the ``JEV_ASSUME_HUMAN`` environment variable.
+    """
+    override = os.environ.get("JEV_ASSUME_HUMAN")
+    if override is not None and override.strip():
+        return override.strip().lower() in ("1", "true", "yes", "on")
+
+    mode = str(policy.get("assume_human", "auto")).lower()
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    try:
+        descriptor = os.open("/dev/tty", os.O_RDWR)
+    except OSError:
+        return False
+    os.close(descriptor)
+    return True
+
+
+def finalize(
+    decision: dict,
+    config: dict[str, Any],
+    gate: str,
+    advisory_context: str | None = None,
+) -> dict[str, Any] | None:
+    """Map an internal decision through the gate's stance (the official bands)."""
+    kind = decision["kind"]
+    message = decision.get("message")
+    details = decision.get("details") or {}
+    mode = gate_mode(config, gate)
+    policy = config.get("policy") or {}
+
+    if kind == "context":
+        log_decision(gate, "context", details, config)
+        return context_payload(decision.get("context") or "", message)
+
+    if kind == "allow":
+        log_decision(gate, "allow", details, config)
+        return allow_payload(message) if message else None
+
+    if kind == "ask":
+        if mode == "advisory":
+            log_decision(gate, "advisory", {**details, "downgraded_from": "ask"}, config)
+            return allow_payload(f"{message or 'JEV flagged this step'} (advisory only: not blocking)")
+        if mode == "auto" or not human_available(policy):
+            if str(policy.get("ask_fallback", "deny")).lower() == "allow":
+                log_decision(gate, "fallback_allow", details, config)
+                return allow_payload(f"{message or 'JEV was unsure'} (no confirmation available: allowed)")
+            log_decision(gate, "fallback_deny", details, config)
+            return deny_payload(UNVERIFIED_REASON, f"{message or 'JEV was unsure'} (no confirmation available: blocked)")
+        log_decision(gate, "ask", details, config)
+        return ask_payload(message or "JEV flagged this step as uncertain; confirm before continuing.")
+
+    # kind == "deny"
+    if mode == "advisory":
+        log_decision(gate, "advisory", {**details, "downgraded_from": "deny"}, config)
+        payload = allow_payload(f"{message or 'JEV flagged this step'} (advisory only: not blocking)")
+        if advisory_context:
+            payload["hookSpecificOutput"] = {"additionalContext": advisory_context}
+        return payload
+    log_decision(gate, "deny", details, config)
+    return deny_payload(decision.get("reason") or "JEV blocked this step.", message)
+
+
+def _confidence_note(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}"
+
+
+def _below_floor(value: float | None, floor: float) -> bool:
+    return value is not None and value < floor
+
+
 # --------------------------------------------------------------------------
-# AfterAgent: the quality gate that can ask for exactly one correction pass.
+# AfterAgent: the quality gate that can ask for one correction pass.
 # --------------------------------------------------------------------------
 
 def handle_after_agent(event: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    gate = "AfterAgent"
     if event.get("stop_hook_active"):
-        return allow_payload("JEV accepted the retry result without another automatic retry")
+        return finalize(allow_decision("JEV accepted the retry result without another automatic retry"), config, gate)
 
     if not load_api_key():
-        return allow_payload(SKIP_MESSAGE)
+        return finalize(allow_decision(SKIP_MESSAGE), config, gate)
 
     thresholds = config["thresholds"]
+    policy = config["policy"]
     cwd = event.get("cwd") or os.getcwd()
     state = {
         "user_request": clip(event.get("prompt", "")),
@@ -129,25 +278,57 @@ def handle_after_agent(event: dict[str, Any], config: dict[str, Any]) -> dict[st
     answers = ask_jev(questions, state, config)
     retry = noul(answers, "needs_retry")
     risk = score(answers, "risk")
+    risk_confidence = confidence(answers, "risk")
 
-    hard_retry = retry >= float(thresholds["after_agent_retry"])
-    # A high risk score lowers the bar: risk is now part of the decision
-    # instead of being reported and ignored.
-    risk_retry = (
-        risk >= float(thresholds["after_agent_risk_hard"])
-        and retry >= float(thresholds["after_agent_retry_soft"])
-    )
+    details = {
+        "needs_retry": round(retry, 4),
+        "risk": round(risk, 3),
+        "risk_confidence": risk_confidence,
+        "risk_probabilities": probabilities(answers, "risk"),
+    }
 
-    if hard_retry or risk_retry:
-        trigger = "needs_retry" if hard_retry else "risk"
-        return deny_payload(
+    retry_at = float(thresholds["after_agent_retry"])
+    risk_hard = float(thresholds["after_agent_risk_hard"])
+    uncertain_low = float(policy["uncertain_low"])
+    floor = float(policy["confidence_floor"])
+
+    # A high risk score only lowers the bar when the risk read itself is
+    # trustworthy; a low-confidence read must not trigger work by itself.
+    risk_actionable = risk >= risk_hard and not _below_floor(risk_confidence, floor)
+
+    if retry >= retry_at:
+        decision = deny_decision(
             RETRY_REASON,
-            f"JEV requested a correction pass ({trigger}: needs_retry={retry:.2f}, risk={risk:.1f})",
+            f"JEV requested a correction pass (needs_retry={retry:.2f}, risk={risk:.1f})",
+            details,
         )
+    elif retry >= uncertain_low and risk_actionable:
+        # Medium confidence on a high-stakes change: gather information instead
+        # of either accepting it or demanding a full rewrite.
+        decision = deny_decision(
+            VERIFY_REASON,
+            (
+                f"JEV wants verification evidence (needs_retry={retry:.2f}, "
+                f"risk={risk:.1f}, risk_confidence={_confidence_note(risk_confidence)})"
+            ),
+            details,
+        )
+    elif retry >= uncertain_low:
+        decision = allow_decision(
+            (
+                f"JEV: unverified but probably fine (needs_retry={retry:.2f}, "
+                f"risk={risk:.1f}); treat the result as provisional"
+            ),
+            details,
+        )
+    elif config.get("report", {}).get("after_agent_pass", True):
+        decision = allow_decision(
+            f"JEV quality gate passed (needs_retry={retry:.2f}, risk={risk:.1f})", details
+        )
+    else:
+        decision = allow_decision(None, details)
 
-    if config.get("report", {}).get("after_agent_pass", True):
-        return allow_payload(f"JEV quality gate passed (needs_retry={retry:.2f}, risk={risk:.1f})")
-    return None
+    return finalize(decision, config, gate)
 
 
 # --------------------------------------------------------------------------
@@ -202,8 +383,6 @@ def tool_candidate(tool_name: str, tool_input: dict[str, Any], options: dict[str
             if tool_input.get(key)
         ]
         target = " ".join(parts)
-        import re
-
         for pattern in options.get("sensitive_path_patterns", []):
             try:
                 if re.search(pattern, target):
@@ -218,6 +397,7 @@ def tool_candidate(tool_name: str, tool_input: dict[str, Any], options: dict[str
 
 
 def handle_before_tool(event: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    gate = "BeforeTool"
     options = config["before_tool"]
     tool_name = event.get("tool_name") or ""
     tool_input = event.get("tool_input")
@@ -232,6 +412,7 @@ def handle_before_tool(event: dict[str, Any], config: dict[str, Any]) -> dict[st
         return _tool_failure(options, "no TypeSafe API key configured")
 
     thresholds = config["thresholds"]
+    policy = config["policy"]
     state = {
         "tool": tool_name,
         "candidate_reason": reason,
@@ -268,23 +449,60 @@ def handle_before_tool(event: dict[str, Any], config: dict[str, Any]) -> dict[st
 
     answers = ask_jev(questions, state, config)
     danger = score(answers, "danger")
+    danger_confidence = confidence(answers, "danger")
     leak = noul(answers, "secret_exposure")
 
-    if danger >= float(thresholds["before_tool_deny"]) or leak >= float(thresholds["before_tool_leak_deny"]):
-        detail = "secret exposure" if leak >= float(thresholds["before_tool_leak_deny"]) else "destructive action"
-        return deny_payload(
+    details = {
+        "tool": tool_name,
+        "candidate_reason": reason,
+        "danger": round(danger, 3),
+        "danger_confidence": danger_confidence,
+        "danger_probabilities": probabilities(answers, "danger"),
+        "secret_exposure": round(leak, 4),
+    }
+
+    deny_at = float(thresholds["before_tool_deny"])
+    ask_at = float(thresholds["before_tool_ask"])
+    leak_deny = float(thresholds["before_tool_leak_deny"])
+    uncertain_low = float(policy["uncertain_low"])
+    floor = float(policy["confidence_floor"])
+    auto_act = float(policy["auto_act_confidence"])
+
+    # A destructive action is auto-blocked only when the read is confident;
+    # secret exposure acts as a veto (a Noul has no confidence to weigh).
+    strong_deny = danger >= deny_at and not _below_floor(danger_confidence, auto_act)
+
+    if strong_deny or leak >= leak_deny:
+        detail = "secret exposure" if leak >= leak_deny else "destructive action"
+        decision = deny_decision(
             (
                 f"JEV blocked this tool call ({detail}). Do not retry it as-is: "
                 "explain what you were trying to achieve and propose a safe "
                 "alternative, or ask the user how to proceed."
             ),
-            f"JEV blocked {tool_name} (danger={danger:.1f}, secret_exposure={leak:.2f})",
+            (
+                f"JEV blocked {tool_name} (danger={danger:.1f}, "
+                f"danger_confidence={_confidence_note(danger_confidence)}, "
+                f"secret_exposure={leak:.2f})"
+            ),
+            details,
         )
+    elif _below_floor(danger_confidence, floor) or danger >= ask_at or leak >= uncertain_low:
+        why = []
+        if _below_floor(danger_confidence, floor):
+            why.append(f"low confidence ({_confidence_note(danger_confidence)})")
+        if danger >= ask_at:
+            why.append(f"danger={danger:.1f}")
+        if leak >= uncertain_low:
+            why.append(f"possible secret exposure={leak:.2f}")
+        decision = ask_decision(
+            f"JEV flagged {tool_name} ({', '.join(why)}); confirm before running it.",
+            details,
+        )
+    else:
+        decision = allow_decision(None, details)
 
-    if danger >= float(thresholds["before_tool_ask"]):
-        return ask_payload(f"JEV flagged {tool_name} as medium risk (danger={danger:.1f}); confirm before running it.")
-
-    return None
+    return finalize(decision, config, gate)
 
 
 def _tool_failure(options: dict[str, Any], error: str) -> dict[str, Any] | None:
@@ -303,14 +521,16 @@ def _tool_failure(options: dict[str, Any], error: str) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------
 
 def handle_before_agent(event: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    gate = "BeforeAgent"
     prompt = (event.get("prompt") or "").strip()
     if not prompt:
         return None
 
     if not load_api_key():
-        return allow_payload(SKIP_MESSAGE)
+        return finalize(allow_decision(SKIP_MESSAGE), config, gate)
 
     thresholds = config["thresholds"]
+    policy = config["policy"]
     state = {
         "user_request": clip(prompt),
         "workspace": repo_snapshot(event.get("cwd") or os.getcwd()),
@@ -345,20 +565,47 @@ def handle_before_agent(event: dict[str, Any], config: dict[str, Any]) -> dict[s
     violation = noul(answers, "policy_violation")
     needs_plan = noul(answers, "needs_plan")
 
-    if violation >= float(thresholds["before_agent_policy_deny"]):
-        return deny_payload(
+    details = {
+        "policy_violation": round(violation, 4),
+        "needs_plan": round(needs_plan, 4),
+    }
+
+    deny_at = float(thresholds["before_agent_policy_deny"])
+    plan_at = float(thresholds["before_agent_plan_notice"])
+    uncertain_low = float(policy["uncertain_low"])
+
+    caution = violation >= uncertain_low
+    if violation >= deny_at:
+        decision = deny_decision(
             (
                 "JEV policy gate refused this request. If the goal is legitimate, "
                 "restate it without the unsafe part (no secret access, no "
                 "destructive or review-bypassing steps)."
             ),
             f"JEV refused the request (policy_violation={violation:.2f})",
+            details,
         )
+    elif caution:
+        # Medium confidence on a possibly unsafe request: do not refuse the
+        # user's own request, but tell the agent to push back on the unsafe part.
+        decision = context_decision(
+            CAUTION_CONTEXT,
+            f"JEV: request may be unsafe (policy_violation={violation:.2f}); proceed carefully",
+            details,
+        )
+    elif needs_plan >= plan_at:
+        decision = context_decision(
+            PLAN_CONTEXT, f"JEV pre-flight note (needs_plan={needs_plan:.2f})", details
+        )
+    else:
+        decision = allow_decision(None, details)
 
-    if needs_plan >= float(thresholds["before_agent_plan_notice"]):
-        return context_payload(PLAN_CONTEXT, f"JEV pre-flight note (needs_plan={needs_plan:.2f})")
-
-    return None
+    return finalize(
+        decision,
+        config,
+        gate,
+        advisory_context=CAUTION_CONTEXT if caution else None,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -366,10 +613,12 @@ def handle_before_agent(event: dict[str, Any], config: dict[str, Any]) -> dict[s
 # --------------------------------------------------------------------------
 
 def handle_session_start(event: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    gate = "SessionStart"
     if not load_api_key():
-        return allow_payload(SKIP_MESSAGE)
+        return finalize(allow_decision(SKIP_MESSAGE), config, gate)
 
     thresholds = config["thresholds"]
+    policy = config["policy"]
     cwd = event.get("cwd") or os.getcwd()
     state = {
         "workspace": repo_snapshot(cwd),
@@ -401,18 +650,42 @@ def handle_session_start(event: dict[str, Any], config: dict[str, Any]) -> dict[
 
     answers = ask_jev(questions, state, config)
     risk = score(answers, "repo_risk")
+    risk_confidence = confidence(answers, "repo_risk")
     burden = noul(answers, "verification_burden")
 
-    if risk < float(thresholds["session_notice"]) and burden < 0.8:
-        return None
+    details = {
+        "repo_risk": round(risk, 3),
+        "risk_confidence": risk_confidence,
+        "risk_probabilities": probabilities(answers, "repo_risk"),
+        "verification_burden": round(burden, 4),
+    }
 
-    context = (
-        "JEV session pre-flight: this repository needs deliberate verification. "
-        "Prefer small changes, run the project's tests or verification commands, "
-        "and state explicitly what you verified. Do not touch credentials, "
-        "production data, or deployment configuration unless asked."
-    )
-    return context_payload(context, f"JEV session notice (repo_risk={risk:.1f}, verification_burden={burden:.2f})")
+    notice = float(thresholds["session_notice"])
+    burden_notice = float(thresholds["session_burden_notice"])
+    floor = float(policy["confidence_floor"])
+
+    risk_actionable = risk >= notice and not _below_floor(risk_confidence, floor)
+    if risk >= notice and not risk_actionable:
+        print(
+            "JEV session pre-flight: repository risk read was uncertain "
+            f"(risk={risk:.1f}, confidence={_confidence_note(risk_confidence)}); no advisory injected",
+            file=sys.stderr,
+        )
+
+    if risk_actionable or burden >= burden_notice:
+        decision = context_decision(
+            SESSION_CONTEXT,
+            (
+                f"JEV session notice (repo_risk={risk:.1f}, "
+                f"risk_confidence={_confidence_note(risk_confidence)}, "
+                f"verification_burden={burden:.2f})"
+            ),
+            details,
+        )
+    else:
+        decision = allow_decision(None, details)
+
+    return finalize(decision, config, gate)
 
 
 HANDLERS = {
