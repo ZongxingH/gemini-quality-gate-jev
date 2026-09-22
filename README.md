@@ -78,7 +78,7 @@ bash /tmp/jev-gqg/install.sh --uninstall
 | `--events LIST` | `AfterAgent`、`BeforeTool`、`BeforeAgent`、`SessionStart` | 挂哪几个门。可多选，逗号或空格分隔；也可写序号 `1`–`4`、或 `all`。不写则交互选择，直接回车 = 只挂 `AfterAgent`。**至少要有一个** |
 | `--repo URL` | Git 仓库地址，或本地目录 | 默认官方仓库；本地目录时不支持 `--ref` |
 | `--ref REF` | 分支 / tag / commit | 只对 Git 源有效 |
-| `--api-key KEY` | TypeSafe Jev key | 不写则交互隐藏输入（key 会留在 shell 历史里，CI 更推荐下面两种） |
+| `--api-key KEY` | TypeSafe Jev key | 不写则依次尝试：`TYPESAFE_API_KEY` 环境变量 → 已存的密钥文件 → 交互隐藏输入（key 会留在 shell 历史里，CI 更推荐下面两种） |
 | `--api-key-file PATH` | 文件路径 | 文件内容是裸 key，或一行 `TYPESAFE_API_KEY=...` |
 | `--key-file PATH` | 文件路径 | key 的保存位置，默认 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env` |
 | `--dry-run` | — | 只打印将要执行的命令，不做任何改动 |
@@ -86,7 +86,7 @@ bash /tmp/jev-gqg/install.sh --uninstall
 | `--purge-key` | 配合 `--uninstall` | 连密钥和门配置一起删除 |
 | `-h, --help` | — | 列出全部选项 |
 
-密钥也可以直接用环境变量给：`TYPESAFE_API_KEY=ts_xxx bash /tmp/jev-gqg/install.sh --global`。
+密钥也可以直接用环境变量给：`TYPESAFE_API_KEY=ts_xxx bash /tmp/jev-gqg/install.sh --global`。第一次装完 key 就存在密钥文件里了，之后改门/更新/卸载都不用再传 key。
 
 安装脚本会：读密钥 → 写入 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600，不进仓库）→ 从 Git 仓库安装扩展 → 把门的选择写进 `…/typesafe/jev.json` → 按选择裁剪已安装的 `hooks/hooks.json` → 按 `--global`/`--project` 设置启用范围 → 用 `gemini extensions list -o json` 复核。
 

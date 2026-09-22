@@ -464,6 +464,9 @@ resolve_api_key() {
     api_key="$(read_key_from_file "$api_key_file")"
   elif [[ -n "${TYPESAFE_API_KEY:-}" ]]; then
     api_key="$TYPESAFE_API_KEY"
+  elif [[ -f "$key_file" ]] && api_key="$(read_key_from_file "$key_file")" && [[ -n "$api_key" ]]; then
+    # Re-running to change gates must not ask for the key again.
+    log "reusing the stored key from $key_file (pass --api-key to replace it)"
   elif (( dry_run )); then
     api_key="ts_dry_run_placeholder"
   else

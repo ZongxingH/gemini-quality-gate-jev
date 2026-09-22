@@ -57,16 +57,27 @@ def run_bash(script: str, *, env_extra: dict | None = None, timeout: float = 60.
         shutil.rmtree(home, ignore_errors=True)
 
 
-def run_install(args: list[str], *, timeout: float = 120.0):
+def run_install(
+    args: list[str],
+    *,
+    seed_key: str | None = None,
+    with_env_key: bool = True,
+    timeout: float = 120.0,
+):
     """Run the real installer with --dry-run against this checkout."""
     home = Path(tempfile.mkdtemp(prefix="jev-install-"))
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
-        "TYPESAFE_API_KEY": "ts_installer_test",
         "TERM": "dumb",
     }
+    if with_env_key:
+        env["TYPESAFE_API_KEY"] = "ts_installer_test"
+    if seed_key is not None:
+        key_dir = home / ".config" / "typesafe"
+        key_dir.mkdir(parents=True, exist_ok=True)
+        (key_dir / "jev.env").write_text(f"TYPESAFE_API_KEY={seed_key}\n", encoding="utf-8")
     try:
         completed = subprocess.run(
             [str(INSTALL), "--global", "--repo", str(ROOT), "--dry-run"] + args,
@@ -200,6 +211,32 @@ class DryRunFlowTests(unittest.TestCase):
         code, output = run_install(["--events", "Nope"])
         self.assertNotEqual(code, 0)
         self.assertIn("unknown gate", output)
+
+
+class ApiKeyReuseTests(unittest.TestCase):
+    """Re-running to change gates must not ask for the key again."""
+
+    def test_stored_key_is_reused(self) -> None:
+        code, output = run_install(
+            ["--events", "all"], seed_key="apikey_stored", with_env_key=False
+        )
+        self.assertEqual(code, 0, output)
+        self.assertIn("reusing the stored key", output)
+        self.assertEqual(selected_gates(output), ALL_GATES)
+
+    def test_explicit_key_wins_over_the_stored_one(self) -> None:
+        code, output = run_install(
+            ["--events", "all", "--api-key", "apikey_explicit"],
+            seed_key="apikey_stored",
+            with_env_key=False,
+        )
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("reusing the stored key", output)
+
+    def test_environment_key_is_used_without_touching_the_file(self) -> None:
+        code, output = run_install(["--events", "all"], with_env_key=True)
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("reusing the stored key", output)
 
 
 if __name__ == "__main__":
