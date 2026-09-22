@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 #
-# install.sh - install the gemini-quality-gate-jev Gemini CLI extension from a
-# Git repository and configure the TypeSafe Jev API key.
+# install.sh - install the gemini-quality-gate-jev extension for Gemini CLI,
+# choose which Jev gates (hook events) are active, and store the API key.
 #
 # Scope:
-#   --global            the extension is enabled for the current user (all
-#                       projects).
-#   --project PATH      the extension is installed once for the user but
-#                       enabled only inside PATH (Gemini CLI 0.60.x loads
-#                       extensions from ~/.gemini/extensions only, so a
-#                       "project install" means workspace-scoped enablement).
+#   --global            enabled for the current user (all projects).
+#   --project PATH      installed once, enabled only inside PATH (Gemini CLI
+#                       0.60.x loads extensions from ~/.gemini/extensions only,
+#                       so a "project install" means workspace-scoped
+#                       enablement).
+#
+# Gates (at least one, multi-select):
+#   AfterAgent    after each answer: ask Jev whether one correction pass is needed
+#   BeforeTool    before a tool runs: block or confirm destructive commands
+#   BeforeAgent   before each request: refuse unsafe asks, nudge broad ones
+#   SessionStart  at session start: inject a verification advisory
 #
 # Verified against Gemini CLI 0.60.x.
 
@@ -19,6 +24,7 @@ readonly DEFAULT_REPO="https://github.com/ZongxingH/gemini-quality-gate-jev.git"
 readonly EXTENSION_NAME="gemini-quality-gate-jev"
 readonly KEY_VAR="TYPESAFE_API_KEY"
 readonly MIN_GEMINI_VERSION="0.60.0"
+readonly EVENT_NAMES=(AfterAgent BeforeTool BeforeAgent SessionStart)
 
 repo="$DEFAULT_REPO"
 ref=""
@@ -27,6 +33,7 @@ project_dir=""
 key_file=""
 api_key=""
 api_key_file=""
+events=""
 dry_run=0
 uninstall=0
 purge_key=0
@@ -36,13 +43,31 @@ usage() {
 Install (or remove) the gemini-quality-gate-jev extension for Gemini CLI.
 
 Usage:
-  ./install.sh --global  [options]
-  ./install.sh --project PATH [options]
-  ./install.sh --uninstall [--project PATH] [options]
+  ./install.sh --global  [--events LIST] [options]
+  ./install.sh --project PATH [--events LIST] [options]
+  ./install.sh --uninstall [--purge-key] [options]
 
 Scope (default: --global):
   --global                 Enable the extension for the current user.
   --project PATH           Enable the extension only inside PATH.
+
+Gates (hook events):
+  --events LIST            Which gates to run. LIST is comma or space
+                           separated, and may be repeated. At least one is
+                           required. Without this option the script asks
+                           interactively (default: AfterAgent).
+
+                             AfterAgent    after each answer: ask Jev whether
+                                           one correction pass is needed
+                             BeforeTool    before a tool runs: block or
+                                           confirm destructive commands and
+                                           secret exposure
+                             BeforeAgent   before each request: refuse unsafe
+                                           asks, nudge broad ones to plan
+                             SessionStart  at session start: inject a
+                                           verification advisory for risky repos
+
+                             all           select every gate
 
 Source:
   --repo URL               Git repository to install from. A local directory
@@ -59,26 +84,29 @@ API key:
                            file containing TYPESAFE_API_KEY=...).
   --key-file PATH          Where to store the key. Default:
                            ${XDG_CONFIG_HOME:-$HOME/.config}/typesafe/jev.env
-                           (mode 600). The hook reads the same file.
+                           (mode 600). The hooks read the same file.
 
 Other:
-  --uninstall              Remove the extension (keeps the key file).
-  --purge-key              With --uninstall, also delete the key file.
+  --uninstall              Remove the extension (keeps the key file and the
+                           gate selection unless --purge-key is given).
+  --purge-key              With --uninstall, also delete the stored key and
+                           the gate configuration.
   --dry-run                Print the commands without running them.
   -h, --help               Show this help.
 
 The key is also read from the TYPESAFE_API_KEY environment variable when set.
-Without any of these, the script prompts interactively with hidden input.
+Without any of these the script prompts interactively with hidden input.
 
 Notes:
   * The script agrees to the Gemini CLI extension consent prompt (--consent)
     on your behalf: it installs and enables a third-party extension, including
-    its AfterAgent hook, from the repository you selected.
+    its hooks, from the repository you selected.
+  * The gate selection is stored in ${XDG_CONFIG_HOME:-$HOME/.config}/typesafe/jev.json
+    and is also used to trim the installed hooks.json. Re-run the script any
+    time to change which gates are active.
   * Gemini CLI does not expose a non-interactive way to configure extension
     settings, so the key is stored in a user-owned file rather than in the
-    extension's OS-keychain setting. Rotate it with:
-      ./install.sh --global            # overwrite the stored key
-      ./install.sh --uninstall --purge-key
+    extension's OS-keychain setting.
 EOF
 }
 
@@ -99,7 +127,7 @@ run() {
 }
 
 # Run a Gemini CLI command from DIR with a pinned, physical GEMINI_CLI_HOME.
-# Optional leading --trust also bypasses the folder-trust prompts (see below).
+# An optional --trust argument also bypasses the folder-trust prompts.
 run_gemini_in() {
   local dir="$1"
   shift
@@ -117,6 +145,103 @@ run_gemini_in() {
   ( cd "$dir" && env GEMINI_CLI_HOME="$gemini_home_root" $trust gemini "$@" )
 }
 
+# Read one line from the terminal, falling back to /dev/tty so that piping the
+# script into bash still allows interactive answers. Returns non-zero when no
+# terminal is available.
+prompt_read() {
+  local __var="$1"
+  if [[ -t 0 ]]; then
+    IFS= read -r "$__var" || return 1
+    return 0
+  fi
+  if { IFS= read -r "$__var" < /dev/tty; } 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# ------------------------------------------------------------------- events
+
+event_desc() {
+  case "$1" in
+    AfterAgent) printf 'after each answer: ask Jev whether one correction pass is needed' ;;
+    BeforeTool) printf 'before a tool runs: block or confirm destructive commands and secret exposure' ;;
+    BeforeAgent) printf 'before each request: refuse unsafe asks, nudge broad ones to plan first' ;;
+    SessionStart) printf 'at session start: inject a verification advisory for risky repos' ;;
+    *) printf '' ;;
+  esac
+}
+
+canonical_event() {
+  local lowered candidate
+  lowered="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  for candidate in "${EVENT_NAMES[@]}"; do
+    if [[ "$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')" == "$lowered" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Appends the comma/space separated LIST to the global $events variable.
+add_events_from_list() {
+  local list="$1" token name
+  list="${list//,/ }"
+  for token in $list; do
+    case "$token" in
+      all|ALL|All)
+        for name in "${EVENT_NAMES[@]}"; do
+          case ",$events," in *",$name,"*) ;; *) events="${events:+$events,}$name" ;; esac
+        done
+        continue
+        ;;
+      [1-9])
+        if (( token < 1 || token > ${#EVENT_NAMES[@]} )); then
+          die "invalid gate number: $token (use 1-${#EVENT_NAMES[@]})"
+        fi
+        name="${EVENT_NAMES[$((token - 1))]}"
+        ;;
+      *)
+        name="$(canonical_event "$token")" || die "unknown gate: $token"
+        ;;
+    esac
+    case ",$events," in *",$name,"*) ;; *) events="${events:+$events,}$name" ;; esac
+  done
+}
+
+select_events_interactively() {
+  local i=1 name answer=""
+  {
+    printf '\nWhich Jev gates should be active? Choose one or more.\n\n'
+    for name in "${EVENT_NAMES[@]}"; do
+      printf '  %d) %-13s %s\n' "$i" "$name" "$(event_desc "$name")"
+      i=$((i + 1))
+    done
+    printf '\nNumbers separated by spaces or commas, or "all" [default: 1 = AfterAgent]: '
+  } >&2
+
+  if ! prompt_read answer; then
+    events="AfterAgent"
+    warn "no terminal for the gate prompt; defaulting to --events AfterAgent"
+    return 0
+  fi
+
+  answer="${answer%"${answer##*[![:space:]]}"}"
+  if [[ -z "$answer" ]]; then
+    events="AfterAgent"
+    return 0
+  fi
+  add_events_from_list "$answer"
+  [[ -n "$events" ]] || die "select at least one gate"
+}
+
+# ------------------------------------------------------------------- main
+#
+# Everything below runs only when the script is executed, so the file can also
+# be sourced by tests to exercise the gate-selection logic directly.
+
+main() {
 # ---------------------------------------------------------------- arguments
 
 while (($# > 0)); do
@@ -131,6 +256,11 @@ while (($# > 0)); do
       [[ -z "$scope" ]] || die "choose only one of --global or --project"
       scope="project"
       project_dir="$2"
+      shift 2
+      ;;
+    --events)
+      [[ $# -ge 2 ]] || die "--events requires a list (for example: AfterAgent,BeforeTool)"
+      add_events_from_list "$2"
       shift 2
       ;;
     --repo)
@@ -253,6 +383,7 @@ fi
 
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 [[ -n "$key_file" ]] || key_file="$config_home/typesafe/jev.env"
+gate_config="$config_home/typesafe/jev.json"
 
 # Gemini CLI resolves its home as GEMINI_CLI_HOME, else $HOME. Pass the physical
 # path so that workspace paths (always resolved) and the user-scope path used by
@@ -274,6 +405,15 @@ if [[ "$scope" == "project" ]]; then
       warn "so the extension stays enabled by default in other locations."
       ;;
   esac
+fi
+
+# ------------------------------------------------------------------- gates
+
+if (( ! uninstall )) && [[ -z "$events" ]]; then
+  select_events_interactively
+fi
+if (( ! uninstall )); then
+  [[ -n "$events" ]] || die "select at least one gate with --events"
 fi
 
 # ------------------------------------------------------------------- key
@@ -308,9 +448,7 @@ prompt_for_key() {
     printf 'TypeSafe API key (hidden input): ' >&2
     IFS= read -r -s value || true
     printf '\n' >&2
-  elif [[ -r /dev/tty ]]; then
-    printf 'TypeSafe API key (hidden input): ' >&2
-    IFS= read -r -s value < /dev/tty || true
+  elif { IFS= read -r -s value < /dev/tty; } 2>/dev/null; then
     printf '\n' >&2
   else
     die "no terminal available for the API key prompt; use --api-key-file or set $KEY_VAR"
@@ -357,6 +495,67 @@ write_key_file() {
   trap - EXIT
 }
 
+# Merge the gate selection into jev.json, preserving any other keys the user
+# has set there (thresholds, fail modes, ...).
+write_gate_config() {
+  local dir
+  dir="$(dirname "$gate_config")"
+  if (( dry_run )); then
+    printf '[dry-run] record gates [%s] in %s\n' "$events" "$gate_config" >&2
+    return 0
+  fi
+  mkdir -p "$dir"
+  python3 - "$gate_config" "$events" <<'PY'
+import json, os, sys, tempfile
+
+path, events = sys.argv[1], [e for e in sys.argv[2].split(",") if e]
+data = {}
+try:
+    with open(path, encoding="utf-8") as handle:
+        loaded = json.load(handle)
+    if isinstance(loaded, dict):
+        data = loaded
+except FileNotFoundError:
+    pass
+except (OSError, json.JSONDecodeError):
+    pass
+
+data["events"] = events
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".jev.json.")
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, ensure_ascii=False)
+    handle.write("\n")
+os.replace(tmp, path)
+PY
+  chmod 644 "$gate_config" 2>/dev/null || true
+}
+
+# Trim the installed hooks.json to the selected gates. This is an optimisation
+# (no process is spawned for unselected events); the recorded selection in
+# jev.json stays authoritative if an extension update restores every hook.
+prune_installed_hooks() {
+  local hooks_path="$extension_dir/hooks/hooks.json"
+  if (( dry_run )); then
+    printf '[dry-run] keep gates [%s] in %s\n' "$events" "$hooks_path" >&2
+    return 0
+  fi
+  [[ -f "$hooks_path" ]] || return 0
+  python3 - "$hooks_path" "$events" <<'PY' || warn "could not trim $hooks_path; the recorded gate selection still applies"
+import json, sys
+
+path, keep = sys.argv[1], {e for e in sys.argv[2].split(",") if e}
+with open(path, encoding="utf-8") as handle:
+    data = json.load(handle)
+hooks = data.get("hooks")
+if isinstance(hooks, dict):
+    data["hooks"] = {name: value for name, value in hooks.items() if name in keep}
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+PY
+}
+
 # ------------------------------------------------------------- gemini calls
 
 # Gemini CLI refuses to install from an untrusted folder (and would otherwise
@@ -386,9 +585,11 @@ remove_extension() {
   fi
 }
 
-extension_is_active_in() {
+# Prints "<active|inactive|missing|unknown> <gates>", where gates is the
+# comma separated list of hook events the CLI sees for the extension.
+extension_state_in() {
   local work_dir="$1" state
-  (( dry_run )) && { printf 'dry-run' ; return 0; }
+  (( dry_run )) && { printf 'dry-run -' ; return 0; }
   # Gemini CLI writes the JSON report to stderr for command-mode output, and it
   # may prepend warning lines, so slice out the JSON array before parsing.
   state="$( cd "$work_dir" && GEMINI_CLI_HOME="$gemini_home_root" gemini extensions list -o json 2>&1 \
@@ -398,23 +599,25 @@ name = sys.argv[1]
 raw = sys.stdin.read()
 start, end = raw.find("["), raw.rfind("]")
 if start == -1 or end < start:
-    print("unknown")
+    print("unknown -")
     raise SystemExit(0)
 try:
     data = json.loads(raw[start:end + 1])
 except Exception:
-    print("unknown")
+    print("unknown -")
     raise SystemExit(0)
 if not isinstance(data, list):
-    print("unknown")
+    print("unknown -")
     raise SystemExit(0)
 for entry in data:
     if isinstance(entry, dict) and entry.get("name") == name:
-        print("active" if entry.get("isActive") else "inactive")
+        hooks = entry.get("hooks")
+        gates = ",".join(sorted(hooks)) if isinstance(hooks, dict) else ""
+        print(("active" if entry.get("isActive") else "inactive") + " " + (gates or "-"))
         break
 else:
-    print("missing")
-' "$EXTENSION_NAME" 2>/dev/null || printf 'unknown' )"
+    print("missing -")
+' "$EXTENSION_NAME" 2>/dev/null || printf 'unknown -' )"
   printf '%s' "$state"
 }
 
@@ -423,11 +626,12 @@ else:
 if (( uninstall )); then
   work_dir="${project_dir:-$PWD}"
   remove_extension "$work_dir"
-  if (( purge_key )) && [[ -f "$key_file" ]]; then
-    run rm -f "$key_file"
-    log "Removed key file $key_file"
-  elif [[ -f "$key_file" ]]; then
-    log "Kept key file $key_file (use --purge-key to delete it)."
+  if (( purge_key )); then
+    [[ -f "$key_file" ]] && { run rm -f "$key_file"; log "Removed key file $key_file"; }
+    [[ -f "$gate_config" ]] && { run rm -f "$gate_config"; log "Removed gate configuration $gate_config"; }
+  else
+    [[ -f "$key_file" ]] && log "Kept key file $key_file (use --purge-key to delete it)."
+    [[ -f "$gate_config" ]] && log "Kept gate configuration $gate_config."
   fi
   log "Done. Restart Gemini CLI."
   exit 0
@@ -449,8 +653,11 @@ work_dir="${project_dir:-$PWD}"
 install_extension_from "$work_dir"
 if (( ! dry_run )); then
   log "note: a warning about the missing 'TypeSafe API key' extension setting is expected;"
-  log "      the hook reads the key from $key_file instead."
+  log "      the hooks read the key from $key_file instead."
 fi
+
+write_gate_config
+prune_installed_hooks
 
 if [[ "$scope" == "global" ]]; then
   run_gemini_in "$work_dir" extensions enable "$EXTENSION_NAME" --scope user
@@ -468,7 +675,10 @@ if (( dry_run )); then
   exit 0
 fi
 
-status="$(extension_is_active_in "$work_dir")"
+state="$(extension_state_in "$work_dir")"
+status="${state%% *}"
+seen="${state#* }"
+
 case "$status" in
   active)
     if [[ "$scope" == "global" ]]; then
@@ -491,18 +701,31 @@ case "$status" in
     ;;
 esac
 
+if [[ -n "$seen" && "$seen" != "-" && "$seen" != "$events" ]]; then
+  warn "the CLI reports gates [$seen] but [$events] was selected;"
+  warn "run 'gemini extensions list' to inspect the extension."
+fi
+
 # ------------------------------------------------------------------ advice
 
 log ""
+log "Gates:     $events"
+log "Gate conf: $gate_config"
 log "API key:   $key_file (mode 600)"
 log "Extension: $extension_dir"
 case "$scope" in
   global)
-    log "The AfterAgent quality gate now runs in every project for this user."
+    log "These gates now run in every project for this user."
     ;;
   project)
-    log "The AfterAgent quality gate now runs only inside $project_dir."
+    log "These gates now run only inside $project_dir."
     log "Other projects stay untouched until you run the script for them."
     ;;
 esac
+log "Change gates later by re-running this script with --events."
 log "Restart Gemini CLI before using the extension."
+}
+
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+  main "$@"
+fi

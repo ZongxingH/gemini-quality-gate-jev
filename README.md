@@ -1,128 +1,169 @@
 # gemini-quality-gate-jev
 
-给 Gemini CLI 装一个「质量门」：每轮回答结束后，用 [TypeSafe Jev](https://typesafe.ai/) 判断这次交付是否还缺关键步骤，缺就让 Gemini 自动再改一轮。
+给 Gemini CLI 装上 [TypeSafe Jev](https://typesafe.ai/) 做的「质量门」：在关键节点问 Jev 几个结构化问题（要不要返工、这步危险吗、这个请求该不该做），再据此放行、打回、拦截或先弹出确认。
 
-Jev 在这里只回答两个结构化判断（要不要返工、风险多高），不生成任何代码或文字。
+Jev 只回答判断，不生成代码或文字。安装时自己选要挂哪几个门，**至少一个、可多选**。
 
-## 它做什么
+## 四个可选的门
 
-Gemini 完成一轮回答时（`AfterAgent` 事件），扩展把三样东西交给 Jev：
+| 门（Hook 事件） | 触发时机 | 问 Jev 什么 | 会做什么 |
+| --- | --- | --- | --- |
+| **AfterAgent** | 每轮回答结束后 | 这轮回答有没有必须补的遗漏；变更风险多高 | 有遗漏（或高风险+中等遗漏）→ 打回，让 Gemini 带着「复查需求、跑验证、给证据」再改一轮，只补一轮 |
+| **BeforeTool** | 每次工具调用前 | 这步有多危险（0–3）；会不会泄露/覆盖密钥 | 高 → 拒绝这次调用；中 → 弹出确认让你决定；低 → 放行 |
+| **BeforeAgent** | 每次收到你的请求 | 这个请求是否该拒绝；是否需要先做计划 | 明确违规 → 拒绝该请求；请求偏大 → 注入一条「先计划再动手」的上下文 |
+| **SessionStart** | 会话开始（startup/resume） | 这个仓库当前有多高风险；验证负担多重 | 风险高 → 注入一条会话级验证提醒 |
 
-| 交给 Jev 的内容 | 说明 |
-| --- | --- |
-| 用户请求 | 这一轮要 Gemini 做什么 |
-| 最终回答 | Gemini 这一轮的交付说明 |
-| 工作区摘要 | `git status --short` 与 `git diff --stat` |
+三种失败行为：**放行**（默认，Jev 不可用时不阻塞你）、**打回**（只针对 AfterAgent，且只一轮）、**拦截/确认**（BeforeTool，可选改成 fail-closed）。
 
-Jev 返回两个判断：
-
-- **`needs_retry`**：这轮回答有没有必须补上的遗漏（0–1 的概率）
-- **`risk`**：这次变更的风险等级（分数）
-
-当 `needs_retry >= 0.85` 时，扩展会**打回这轮结果**，让 Gemini 带着「复查需求、跑验证、给出证据」的要求自动再答一轮；只补一轮，不会无限重试。其余情况直接放行。
-
-**异常一定放行**：没配 API key、网络不通、Jev 超时或返回异常，扩展都会放行，不会把 Gemini CLI 卡住。
+为控制延迟和费用，BeforeTool 会先在本地过滤：读文件、`ls`、`git status` 这类只读操作**根本不会请求 Jev**，只有 shell 命令、敏感文件写入和 MCP 工具才会送审。
 
 ## 前置条件
 
 - Gemini CLI **0.60 或更高**
-- **Python 3**（hook 用系统 `python3` 执行）
+- **Python 3**（Hook 用系统 `python3` 执行）
 - 一个 **TypeSafe Jev API key**，在 <https://console.typesafe.ai/settings/keys> 创建
-- git（可选：用于采集工作区摘要，不在 git 仓库时会自动跳过）
 
 ## 安装
 
-一条命令（当前用户的所有项目都启用）：
+一条命令，安装时会让你选门：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global
 ```
 
-只给某个项目启用：
+会先问你密钥（隐藏输入），再出现选择菜单：
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --project /path/to/your/project
+```
+Which Jev gates should be active? Choose one or more.
+
+  1) AfterAgent    after each answer: ask Jev whether one correction pass is needed
+  2) BeforeTool    before a tool runs: block or confirm destructive commands and secret exposure
+  3) BeforeAgent   before each request: refuse unsafe asks, nudge broad ones to plan first
+  4) SessionStart  at session start: inject a verification advisory for risky repos
+
+Numbers separated by spaces or commas, or "all" [default: 1 = AfterAgent]:
 ```
 
-> 扩展文件装在用户目录（Gemini CLI 只从 `~/.gemini/extensions` 加载扩展），但只在这个项目里启用，其他项目不受影响。
+输入 `2 3`、`AfterAgent,BeforeTool`、`all` 都可以；直接回车默认只挂 AfterAgent。**至少要选一个。**
 
-克隆后本地运行、锁定版本，或在 CI 里非交互执行：
+非交互（CI、脚本）用 `--events`：
 
 ```bash
-git clone https://github.com/ZongxingH/gemini-quality-gate-jev.git
-cd gemini-quality-gate-jev
+# 只要返工门和工具拦截门
+./install.sh --global --events AfterAgent,BeforeTool
 
-./install.sh --global
+# 用序号、大小写随意
+./install.sh --global --events "3, afteragent"
+
+# 四个门全开
+./install.sh --global --events all
+
+# 只给某个项目启用
+./install.sh --project /path/to/project --events BeforeTool,SessionStart
+
+# 指定仓库/版本
 ./install.sh --global --repo https://github.com/ZongxingH/gemini-quality-gate-jev.git --ref main
-TYPESAFE_API_KEY=... ./install.sh --project "$PWD"
-./install.sh --global --api-key-file ~/keys/jev.env
+
+# 密钥从文件读，全程不交互
+./install.sh --global --events all --api-key-file ~/keys/jev.env
 ```
 
-安装脚本会：
+安装脚本会：读密钥 → 写入 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600，不进仓库）→ 从 Git 仓库安装扩展 → 把门的选择写进 `…/typesafe/jev.json` → 按选择裁剪已安装的 `hooks/hooks.json` → 按 `--global`/`--project` 设置启用范围 → 用 `gemini extensions list -o json` 复核。
 
-1. 读取 `TYPESAFE_API_KEY`（优先级：`--api-key` > `--api-key-file` > 环境变量 > 隐藏交互输入），写入 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600，不会进仓库）；
-2. 从 Git 仓库安装扩展；
-3. 按 `--global` / `--project` 设置启用范围；
-4. 用 `gemini extensions list -o json` 复核扩展是否真的启用。
-
-安装完**重启 Gemini CLI**，然后验证：
+装完**重启 Gemini CLI**，然后确认：
 
 ```bash
-gemini extensions list        # 应看到 gemini-quality-gate-jev，且为 enabled
+gemini extensions list        # 应看到 gemini-quality-gate-jev，enabled
+cat ~/.config/typesafe/jev.json
 ```
 
 ## 使用
 
-重启后不需要额外操作，正常使用 `gemini` 即可：
+重启后正常用 `gemini` 即可，不需要额外操作：
 
-- **判定通过**：直接通过，不影响回答；
-- **判定需要修正**：你会看到 `JEV requested a correction pass …`，Gemini 会自动再答一轮，并在这一轮里复查需求、运行验证、给出证据；
-- **Jev 不可用或没配 key**：正常回答，只是没有质量门（会在提示里说明原因）。
+- **AfterAgent 打回**：会出现 `JEV requested a correction pass …`，Gemini 自动再答一轮；这一轮不会再次被打回。
+- **BeforeTool 拦截**：危险命令会看到 `JEV blocked this tool call …`，模型会知道被拦并改方案；中等风险会弹出确认框，由你决定放行还是取消。
+- **BeforeAgent 注入**：请求偏大时，你会在上下文里看到一条 `JEV pre-flight note`，要求先计划、跑验证。
+- **SessionStart 提醒**：高风险仓库会注入一条验证提醒。
+- **Jev 不可用 / 没配 key**：全部放行，只打印原因，不会卡住会话。
 
-想看它是否在工作，可以在任意目录跑一条模拟事件：
+只想验证脚本本身是否工作（不启动 Gemini）：
 
 ```bash
-printf '%s' '{"hook_event_name":"AfterAgent","cwd":".","prompt":"修复登录接口","prompt_response":"已修改代码，但没有运行测试","stop_hook_active":false}' \
-  | python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_after_agent.py
+printf '%s' '{"hook_event_name":"AfterAgent","cwd":".","prompt":"修复登录接口","prompt_response":"已改代码但没跑测试","stop_hook_active":false}' \
+  | python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_hook.py
 ```
 
-没配 key 时会输出 `decision: allow` 并提示 Jev 被跳过；配了 key 就会真实访问 Jev 并给出判定。
+当前挂了哪些门：
+
+```bash
+python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_hook.py --print-events
+```
 
 ## 配置
 
-用环境变量调整（写在 shell profile 或 Gemini 的运行环境里）：
+「挂了哪些门」写在 `~/.config/typesafe/jev.json`（安装脚本写入 `events`，其余键可自己加）：
+
+```json
+{
+  "events": ["AfterAgent", "BeforeTool"],
+  "thresholds": {
+    "after_agent_retry": 0.85,
+    "after_agent_risk_hard": 2.5,
+    "after_agent_retry_soft": 0.5,
+    "before_tool_ask": 1.5,
+    "before_tool_deny": 2.5,
+    "before_tool_leak_deny": 0.8,
+    "before_agent_policy_deny": 0.9,
+    "before_agent_plan_notice": 0.6,
+    "session_notice": 1.5
+  },
+  "before_tool": {
+    "fail_mode": "open"
+  }
+}
+```
+
+改完立即生效（下次 Hook 触发时读取）。改门的话重新跑一次 `install.sh --events …`，它会保留你在这里写的其他配置。
+
+- `fail_mode`：`open`（默认，Jev 不可用时放行）或 `closed`（不可用时拒绝工具调用）。
+- `before_tool.safe_command_prefixes`：本地直接放行的只读命令前缀，默认已含 `ls/cat/grep/git status/git diff/...`。
+- `before_tool.sensitive_path_patterns`：写入这些路径的文件才会送审（`.env`、`.ssh/`、`*.pem`、`credentials` 等）。
+
+环境变量（可选，覆盖配置）：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `TYPESAFE_API_KEY` | 无 | API key；未设置时读取 `~/.config/typesafe/jev.env` |
+| `TYPESAFE_API_KEY` | 无 | API key；未设置时读 `~/.config/typesafe/jev.env` |
 | `TYPESAFE_API_URL` | `https://api.typesafe.ai/v1/systemone` | Jev API 地址 |
 | `TYPESAFE_MODEL` | `jev-latest` | 使用的 Jev 模型 |
-| `JEV_HOOK_TIMEOUT_SECONDS` | `5` | 单次 Jev 请求的超时（秒） |
-
-判定策略目前是固定的：`needs_retry >= 0.85` 才打回重做，重做后的那一轮不再二次打回。
+| `JEV_HOOK_TIMEOUT_SECONDS` | 每门 3–5 秒 | 单次 Jev 请求超时 |
+| `JEV_CONFIG_FILE` | `~/.config/typesafe/jev.json` | 覆盖配置文件位置 |
 
 ## 更新与卸载
 
 ```bash
-./install.sh --global                  # 重新运行即更新到仓库最新版本
-./install.sh --uninstall               # 卸载扩展，保留密钥文件
-./install.sh --uninstall --purge-key   # 卸载扩展并删除密钥文件
-./install.sh --global --dry-run        # 只打印将要执行的命令
-./install.sh --help                    # 全部选项
-```
-
-## 手动配置密钥
-
-不使用安装脚本时，可以自己写入密钥文件：
-
-```bash
-mkdir -p ~/.config/typesafe
-read -r -s JEV_KEY
-printf 'TYPESAFE_API_KEY=%s\n' "$JEV_KEY" > ~/.config/typesafe/jev.env
-unset JEV_KEY
-chmod 600 ~/.config/typesafe/jev.env
+./install.sh --global --events all      # 重新运行即更新到最新版本，并重设门
+./install.sh --uninstall                # 卸载扩展，保留密钥和门配置
+./install.sh --uninstall --purge-key    # 连同密钥和门配置一起删除
+./install.sh --global --dry-run         # 只打印将要执行的命令
+./install.sh --help                     # 全部选项
 ```
 
 ## 数据与隐私
 
-启用后，每一轮回答结束都会把**用户请求、Gemini 的最终回答、git 工作区摘要**发送到 `api.typesafe.ai`。在敏感仓库中使用前，请先确认这符合你的合规要求。
+挂上之后，会把以下内容发送到 `api.typesafe.ai`：
+
+- **AfterAgent**：用户请求、Gemini 的最终回答、`git status --short` 与 `git diff --stat`；
+- **BeforeTool**：工具名、工具参数（只读操作不会发送）、工作区状态；
+- **BeforeAgent / SessionStart**：用户请求或仓库结构摘要（顶层文件名、分支、变更数等，不发送文件内容）。
+
+在敏感仓库使用前，请确认这符合你的合规要求；不需要某个门就不要挂它。
+
+## 测试
+
+```bash
+./tests/run_all.sh
+```
+
+包含 Hook 行为测试（本地 mock Jev，不需要真实密钥）、安装脚本的门选择测试，以及针对真实 Gemini CLI 的端到端安装/卸载检查。

@@ -6,9 +6,49 @@
           {
             "type": "command",
             "name": "jev-after-agent",
-            "command": "python3 \"${extensionPath}/scripts/jev_after_agent.py\"",
-            "timeout": 10000,
-            "description": "Use Jev to validate the final Gemini coding-agent response"
+            "command": "python3 \"${extensionPath}/scripts/jev_hook.py\"",
+            "timeout": 12000,
+            "description": "Jev quality gate: ask for one correction pass when the final answer is incomplete"
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": "^(?!(read_file|read_many_files|grep_search|glob|list_directory|google_web_search|web_fetch|cli_help|write_todos|codebase_investigator)$).*",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "jev-before-tool",
+            "command": "python3 \"${extensionPath}/scripts/jev_hook.py\"",
+            "timeout": 6000,
+            "description": "Jev risk guard: block or confirm destructive tool calls and secret exposure"
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "jev-before-agent",
+            "command": "python3 \"${extensionPath}/scripts/jev_hook.py\"",
+            "timeout": 8000,
+            "description": "Jev policy gate: refuse unsafe requests and nudge broad requests to plan first"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "jev-session-start",
+            "command": "python3 \"${extensionPath}/scripts/jev_hook.py\"",
+            "timeout": 8000,
+            "description": "Jev session pre-flight: inject a verification advisory for risky repositories"
           }
         ]
       }

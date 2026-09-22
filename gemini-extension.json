@@ -1,11 +1,11 @@
 {
   "name": "gemini-quality-gate-jev",
-  "version": "0.1.0",
-  "description": "Use TypeSafe Jev as a quality gate for Gemini CLI agent responses.",
+  "version": "0.2.0",
+  "description": "TypeSafe Jev gates for Gemini CLI: one correction pass after each answer, a risk guard before tool calls, a policy check before each request, and a session pre-flight advisory.",
   "settings": [
     {
       "name": "TypeSafe API key",
-      "description": "API key used to call TypeSafe Jev.",
+      "description": "API key used to call TypeSafe Jev. Optional: the hooks also read ${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env, which install.sh writes.",
       "envVar": "TYPESAFE_API_KEY",
       "sensitive": true
     }
