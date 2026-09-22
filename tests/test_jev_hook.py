@@ -631,6 +631,7 @@ class FailOpenTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(payload["decision"], "allow")
         self.assertIn("JEV unavailable (", payload["systemMessage"])
+        self.assertIn("attempt(s)", payload["systemMessage"])
 
     def test_timeout_keeps_the_session_usable(self) -> None:
         payload, result = run_hook(

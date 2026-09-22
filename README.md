@@ -196,7 +196,9 @@ python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_hook.py --print
 - `before_tool.safe_command_prefixes`：本地直接放行的只读命令前缀，默认已含 `ls/cat/grep/git status/git diff/...`。
 - `before_tool.sensitive_path_patterns`：写入这些路径的文件才会送审（`.env`、`.ssh/`、`*.pem`、`credentials` 等）。
 - `timeouts`：每个门单次 Jev 请求的超时（秒）。首次连接 `api.typesafe.ai` 要付 DNS/TCP/TLS 冷启动成本（受限网络里常见 3–8 秒），所以会话里第一个跑的 `SessionStart` 默认给到 12 秒、`BeforeAgent` 6 秒；网络慢可再调大（上限受 `hooks/hooks.json` 里各门的命令超时约束，改完需重跑安装脚本）。
-- `retries`：单次请求失败后额外重试几次（默认 `0`）。网络抖动明显时设为 `1`~`2` 通常就能救回"会话第一次调用超时"；代价是失败路径的等待时间成倍增加，`retry_delay_seconds` 控制重试间隔（默认 0.3 秒）。
+- `retries`：单次请求失败后额外重试几次（默认 `0`）。网络偶发抖动时设为 `1` 通常就能救回"会话第一次调用卡住"；`retry_delay_seconds` 为重试间隔（默认 0.3 秒），`retry_timeout_seconds` 为**重试用的超时**（默认 8 秒，比首次短，避免总等待时间翻倍）。
+- 失败信息会带上实测耗时与尝试次数，例如 `JEV unavailable (timed out after 1.2s / 1 attempt(s))`，用来判断是"卡住"还是"快速被拒"（快速被拒开 `retries` 才有意义）。
+- `log_decisions: true` 时，这类失败也会被记录（`verdict: "unavailable"`，含 `elapsed_seconds` / `attempts`），可以用真实数据决定要不要加重试。
 
 界面上如果看到 `JEV unavailable (原因); allowed without the quality gate`，表示**该门这一轮没调通、按设计放行了**（不是没装、也不是判定通过）；括号里就是真实原因（超时 / 连接被拒 / 401 等）。连续出现说明网络到 `api.typesafe.ai` 不稳，先把 `timeouts` 调大。
 

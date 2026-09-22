@@ -722,11 +722,27 @@ def run(event: dict[str, Any]) -> dict[str, Any] | None:
     try:
         return HANDLERS[name](event, config)
     except JevError as error:
-        print(f"JEV unavailable ({name}): {error}", file=sys.stderr)
+        print(
+            f"JEV unavailable ({name}): {error} "
+            f"[{error.attempts} attempt(s), {error.elapsed:.1f}s]",
+            file=sys.stderr,
+        )
+        log_decision(
+            name,
+            "unavailable",
+            {
+                "error": short_reason(error),
+                "attempts": error.attempts,
+                "elapsed_seconds": round(error.elapsed, 2),
+            },
+            config,
+        )
         if name == "BeforeTool":
             return _tool_failure(config["before_tool"], str(error))
         return allow_payload(
-            f"JEV unavailable ({short_reason(error)}); allowed without the quality gate"
+            "JEV unavailable "
+            f"({short_reason(error)} after {error.elapsed:.1f}s / {error.attempts} attempt(s)); "
+            "allowed without the quality gate"
         )
     except Exception as error:  # noqa: BLE001 - a hook must never break the CLI
         print(f"JEV hook error ({name}): {error!r}", file=sys.stderr)

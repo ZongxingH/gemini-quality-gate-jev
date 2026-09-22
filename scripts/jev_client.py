@@ -127,6 +127,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # connection of a session is slow. 0 keeps every hook within one timeout.
     "retries": 0,
     "retry_delay_seconds": 0.3,
+    # Retries may use a shorter timeout than the first attempt, so a stalled
+    # first connection does not double the worst-case wait.
+    "retry_timeout_seconds": 8,
     # Append every decision (with Jev's probabilities) to
     # ~/.config/typesafe/jev-decisions.jsonl so thresholds can be calibrated
     # from real traffic later.
@@ -136,6 +139,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 class JevError(RuntimeError):
     """Raised when Jev cannot be reached or answered unexpectedly."""
+
+    def __init__(self, message: str, *, attempts: int = 1, elapsed: float = 0.0) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.elapsed = elapsed
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -366,16 +374,26 @@ def ask_jev(
         delay = max(0.0, float(config.get("retry_delay_seconds") or 0.3))
     except (TypeError, ValueError):
         delay = 0.3
+    try:
+        retry_timeout = max(0.5, float(config.get("retry_timeout_seconds") or timeout))
+    except (TypeError, ValueError):
+        retry_timeout = timeout
 
+    started = time.monotonic()
     payload: Any = None
     for attempt in range(attempts):
+        attempt_timeout = timeout if attempt == 0 else retry_timeout
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=attempt_timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             break
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
             if attempt + 1 >= attempts:
-                raise JevError(str(error)) from error
+                raise JevError(
+                    str(error),
+                    attempts=attempt + 1,
+                    elapsed=time.monotonic() - started,
+                ) from error
             time.sleep(delay)
 
     if not isinstance(payload, dict):
