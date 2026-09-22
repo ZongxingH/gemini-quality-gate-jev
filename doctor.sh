@@ -175,14 +175,38 @@ else
 fi
 
 if [[ -n "$cli_gates" && "$cli_gates" != "-" && -n "$configured" ]]; then
-  sorted_cli="$(printf '%s' "$cli_gates" | tr ',' '\n' | sort | tr '\n' ',')"
-  sorted_cfg="$(printf '%s' "$configured" | tr ',' '\n' | sort | tr '\n' ',')"
-  if [[ "$sorted_cli" == "$sorted_cfg" ]]; then
-    ok "the CLI has exactly the selected gates registered"
-  else
-    bad "registered gates [$cli_gates] differ from the selection [$configured]"
-    info "re-run the installer to re-apply: bash $ROOT/install.sh --events $configured"
-  fi
+  gate_verdict="$(python3 - "$cli_gates" "$configured" <<'PY'
+import sys
+cli = {g for g in sys.argv[1].split(",") if g}
+selected = {g for g in sys.argv[2].split(",") if g}
+missing = sorted(selected - cli)
+extra = sorted(cli - selected)
+if missing:
+    print("missing " + ",".join(missing))
+elif extra:
+    print("superset " + ",".join(extra))
+else:
+    print("exact")
+PY
+)"
+  case "$gate_verdict" in
+    exact)
+      ok "the CLI has exactly the selected gates registered"
+      ;;
+    superset\ *)
+      # Declaring more hooks than are selected is fine: jev.json decides, and
+      # the unselected ones are silent no-ops.
+      ok "every selected gate is registered"
+      info "declared but switched off by jev.json: ${gate_verdict#superset }"
+      ;;
+    missing\ *)
+      bad "these selected gates are not registered: ${gate_verdict#missing }"
+      info "re-run the installer to re-apply: bash $ROOT/install.sh --events $configured"
+      ;;
+    *)
+      bad "could not compare the registered gates with the selection"
+      ;;
+  esac
 fi
 
 # ------------------------------------------------------------------- key

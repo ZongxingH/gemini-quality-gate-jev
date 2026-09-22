@@ -172,7 +172,12 @@ python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_hook.py --print
 }
 ```
 
-改完立即生效（下次 Hook 触发时读取）。改门的话重新跑一次安装脚本并带上 `--events …`（见上面的 [`更新与卸载`](#更新与卸载)），它会保留你在这里写的其他配置。
+改完立即生效（下次 Hook 触发时读取）。
+
+改门有两种方式：
+
+- **只改配置**（最快，不用重装）：把 `events` 数组里的名字删掉即可，被删掉的门会变成静默 no-op（不请求 Jev、不输出任何东西）。缺点是 `hooks/hooks.json` 里仍声明着它，每轮多一次约 60ms 的进程启动开销。
+- **重跑安装脚本带 `--events`**（结构上也一致）：会重新裁剪 `hooks/hooks.json`，`gemini extensions list` 里也就只显示选中的门。两种方式都会保留你写的其他配置。
 
 **决策相关**
 
