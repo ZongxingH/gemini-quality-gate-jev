@@ -15,9 +15,9 @@
 | `deny` 触发一次自动修正，且不会无限重试 | ✅ 逻辑正确（`stop_hook_active` 兜底） |
 | Jev/网络/配置异常时放行（fail-open） | ✅ 四条路径均已实测 |
 | 从 Git 仓库安装、要求 `TYPESAFE_API_KEY`、支持全局或指定项目 | ✅ 脚本已重写并端到端实测 |
-| **从默认远端仓库安装** | ⛔ **当前会失败**：远端 `main` 仍停在 `7ed691a`，不含 `gemini-extension.json` / `hooks/` / `install.sh`，需先提交推送 |
+| **从默认远端仓库安装** | ✅ 扩展文件已推送（`b32eadd`），并已用默认远端仓库跑通完整安装 |
 
-> 一句话：**质量控制门本身功能是完整的**；本轮补齐/修正了 3 处实现缺陷与整套安装脚本；唯一的外部阻塞是“扩展文件还没推到 GitHub”。
+> 一句话：**质量控制门本身功能是完整的**；本轮补齐/修正了 3 处实现缺陷与整套安装脚本，并把扩展文件推送到 GitHub（`b32eadd`）后用默认远端仓库实测通过。
 
 ---
 
@@ -115,7 +115,8 @@ TYPESAFE_API_KEY=... ./install.sh --project "$PWD"
 | `--uninstall` | 扩展目录删除、`extension-enablement.json` 清空、密钥保留 |
 | 重复安装 | 自动先卸载再安装，成功 |
 | 假仓库 / 假 `--ref` / 非扩展目录 / 本地源带 `--ref` | 均快速失败并给出可读错误 |
-| 真实远端（GitHub） | 克隆与 `--ref main` 检出成功；因远端缺少 `gemini-extension.json` 而失败 → 印证 §0 的阻塞项 |
+| 真实远端（GitHub，推送前） | 克隆与 `--ref main` 检出成功；因远端缺少 `gemini-extension.json` 而失败（当时的阻塞项） |
+| 真实远端（GitHub，推送 `b32eadd` 后） | `install.sh --project` 使用**默认远端仓库**安装成功：`installMetadata = {source: https://github.com/ZongxingH/gemini-quality-gate-jev.git, type: git}`，目标项目 `isActive=true`、兄弟项目 `false`，安装后的 hook 从密钥文件取 key 并成功访问 Jev 端点 |
 | 安装后的 hook 读密钥 | 从 `$HOME/.config/typesafe/jev.env` 读到密钥并发起真实请求 ✅ |
 
 ---
@@ -134,13 +135,7 @@ TYPESAFE_API_KEY=... ./install.sh --project "$PWD"
 
 ## 6. 下一步（按优先级）
 
-1. **提交并推送扩展文件**（当前唯一阻塞项）：
-   ```bash
-   git add gemini-extension.json hooks install.sh scripts README.md ANALYSIS.md
-   git commit -m "Add Gemini CLI extension packaging and installer"
-   git push origin main
-   ```
-   推送后 `./install.sh --global` 或 `./install.sh --project <path>` 才能真正“从 Git 仓库安装”。
+1. ~~提交并推送扩展文件~~ **已完成**：扩展文件已推送到 `origin/main`（`7ed691a..b32eadd`），并已用默认远端仓库跑通 `./install.sh --global` / `--project <path>`。
 2. 明确“扩展模式”与“项目级 `.gemini/settings.json` 模式”二选一，避免双重判定。
 3. 把阈值（0.85）、风险策略、超时外置为可配置项；把 Jev 响应做一次显式 schema 校验并落日志。
 4. 把 §5 的 mock 场景固化为自动化测试（可用 `TYPESAFE_API_URL` 指向本地 mock，无需真实密钥）。

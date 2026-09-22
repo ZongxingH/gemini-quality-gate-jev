@@ -53,18 +53,15 @@ printf '%s' '{"hook_event_name":"AfterAgent","cwd":".","prompt":"修复登录接
 
 ## 从 Git 仓库安装
 
-> ⚠️ 先推送扩展文件：远程仓库的 `main` 目前只有最初提交，还不包含 `gemini-extension.json` / `hooks/` / `install.sh`。
-> 未推送前，从 Git 安装会以 `Configuration file not found … gemini-extension.json` 失败。
+无需先克隆仓库：直接把 `install.sh` 跑起来，或按下面的示例克隆后再运行。脚本会把扩展从 Git 仓库安装到用户目录，并把 `TYPESAFE_API_KEY` 保存到 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600），不会写入仓库或 Gemini 配置文件。
+
+一行安装（不落仓库，脚本自己从 Git 拉取扩展）：
 
 ```bash
-git add gemini-extension.json hooks install.sh scripts README.md
-git commit -m "Package as a Gemini CLI extension"
-git push origin main
+bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global
 ```
 
-仓库提供了 [`install.sh`](install.sh) 安装脚本：隐藏读取 `TYPESAFE_API_KEY`，保存到用户目录的 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600），不会写入仓库或 Gemini 配置文件。
-
-全局安装（当前用户的所有项目）：
+克隆后本地运行：
 
 ```bash
 git clone https://github.com/ZongxingH/gemini-quality-gate-jev.git
