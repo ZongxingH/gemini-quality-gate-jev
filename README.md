@@ -51,35 +51,23 @@ Jev 只回答判断，不生成代码或文字。安装时自己选要挂哪几�
 
 ## 安装
 
-全程只用 `github.com`：克隆一次，然后运行仓库里的安装脚本。
+一条命令（只用 `github.com`，参数照抄改值即可）：
 
 ```bash
-git clone --depth 1 https://github.com/ZongxingH/gemini-quality-gate-jev.git ~/gemini-quality-gate-jev
-
-bash ~/gemini-quality-gate-jev/install.sh --global
+git clone --depth 1 https://github.com/ZongxingH/gemini-quality-gate-jev.git /tmp/jev-gqg && bash /tmp/jev-gqg/install.sh --global --events all --api-key ts_xxxxxxxx
 ```
 
-第二条是全局启用 + 交互选门；要指定门、指定项目或完全不交互，就换参数：
+克隆只会做一次；之后改门、指定项目、更新、卸载都用同一个脚本：
 
 ```bash
-# 四个门全开
-bash ~/gemini-quality-gate-jev/install.sh --global --events all
-
-# 只要返工门 + 工具拦截门
-bash ~/gemini-quality-gate-jev/install.sh --global --events AfterAgent,BeforeTool
-
-# 只给某个项目启用
-bash ~/gemini-quality-gate-jev/install.sh --project /path/to/project --events BeforeTool,SessionStart
-
-# 全程不交互（key 直接给，CI 用）
-bash ~/gemini-quality-gate-jev/install.sh --global --events all --api-key ts_xxxxxxxx
-
-# 全程不交互（key 从文件读）
-bash ~/gemini-quality-gate-jev/install.sh --global --events all --api-key-file ~/keys/jev.env
+bash /tmp/jev-gqg/install.sh --global                          # 全局启用 + 交互选门
+bash /tmp/jev-gqg/install.sh --global --events AfterAgent,BeforeTool
+bash /tmp/jev-gqg/install.sh --project /path/to/project --events BeforeTool,SessionStart
+bash /tmp/jev-gqg/install.sh --global --events all --api-key-file ~/keys/jev.env
+bash /tmp/jev-gqg/install.sh --uninstall
 ```
 
-> 不想克隆也行（前提是网络能直连 `raw.githubusercontent.com`，受限网络会报 `curl: (35)`）：
-> `bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global`
+> 为什么不用 `bash <(curl -fsSL https://github.com/…/install.sh)`？GitHub 上取文件的地址（`/raw/…`、`/blob/…?raw=true`）都会 302 跳到 `raw.githubusercontent.com`，这个域名在受限网络里连不上（就是你看到的 `curl: (35)`）。`git clone` 是唯一只走 `github.com` 的取法。
 
 参数说明：
 
@@ -98,7 +86,7 @@ bash ~/gemini-quality-gate-jev/install.sh --global --events all --api-key-file ~
 | `--purge-key` | 配合 `--uninstall` | 连密钥和门配置一起删除 |
 | `-h, --help` | — | 列出全部选项 |
 
-密钥也可以直接用环境变量给：`TYPESAFE_API_KEY=ts_xxx bash ~/gemini-quality-gate-jev/install.sh --global`。
+密钥也可以直接用环境变量给：`TYPESAFE_API_KEY=ts_xxx bash /tmp/jev-gqg/install.sh --global`。
 
 安装脚本会：读密钥 → 写入 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600，不进仓库）→ 从 Git 仓库安装扩展 → 把门的选择写进 `…/typesafe/jev.json` → 按选择裁剪已安装的 `hooks/hooks.json` → 按 `--global`/`--project` 设置启用范围 → 用 `gemini extensions list -o json` 复核。
 
@@ -204,11 +192,12 @@ python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_hook.py --print
 都用克隆下来的那个脚本：
 
 ```bash
-git -C ~/gemini-quality-gate-jev pull     # 更新安装脚本本身（可选）
+# 更新扩展并重设门（clone 那条命令重新执行一次即可拿到最新脚本）
+git clone --depth 1 https://github.com/ZongxingH/gemini-quality-gate-jev.git /tmp/jev-gqg && bash /tmp/jev-gqg/install.sh --global --events all
 
-bash ~/gemini-quality-gate-jev/install.sh --global --events all   # 更新扩展并重设门
-bash ~/gemini-quality-gate-jev/install.sh --uninstall             # 卸载扩展，保留密钥和门配置
-bash ~/gemini-quality-gate-jev/install.sh --uninstall --purge-key # 连密钥和门配置一起删除
+# 卸载：保留密钥和门配置 / 连密钥和门配置一起删除
+bash /tmp/jev-gqg/install.sh --uninstall
+bash /tmp/jev-gqg/install.sh --uninstall --purge-key
 ```
 
 ## 数据与隐私
