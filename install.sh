@@ -701,9 +701,14 @@ case "$status" in
     ;;
 esac
 
-if [[ -n "$seen" && "$seen" != "-" && "$seen" != "$events" ]]; then
-  warn "the CLI reports gates [$seen] but [$events] was selected;"
-  warn "run 'gemini extensions list' to inspect the extension."
+if [[ -n "$seen" && "$seen" != "-" ]]; then
+  # Compare as sets: the CLI may report the gates in a different order.
+  seen_sorted="$(printf '%s' "$seen" | tr ',' '\n' | sort | tr '\n' ',')"
+  events_sorted="$(printf '%s' "$events" | tr ',' '\n' | sort | tr '\n' ',')"
+  if [[ "$seen_sorted" != "$events_sorted" ]]; then
+    warn "the CLI reports gates [$seen] but [$events] was selected;"
+    warn "run 'gemini extensions list' to inspect the extension."
+  fi
 fi
 
 # ------------------------------------------------------------------ advice

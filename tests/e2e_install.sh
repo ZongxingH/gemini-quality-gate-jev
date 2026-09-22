@@ -160,6 +160,11 @@ print(json.dumps({
 PY
 check "re-install records every gate" \
   "$(contains "$(cat "$WORK/state2.json")" '["AfterAgent", "BeforeAgent", "BeforeTool", "SessionStart"]')" "$(cat "$WORK/state2.json")"
+if grep -q 'the CLI reports gates' "$WORK/install2.log"; then
+  check "no spurious gate mismatch warning after re-install" 0 "$(grep 'the CLI reports gates' "$WORK/install2.log")"
+else
+  check "no spurious gate mismatch warning after re-install" 1
+fi
 
 run_hook "{\"hook_event_name\":\"BeforeAgent\",\"cwd\":\"$HOME_DIR\",\"prompt\":\"refactor everything\"}" >/dev/null
 check "BeforeAgent now reaches Jev" "$([[ "$(count_requests)" -gt "$BEFORE_REQUESTS" ]] && printf 1 || printf 0)" "requests=$(count_requests)"
