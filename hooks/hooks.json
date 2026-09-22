@@ -34,7 +34,7 @@
             "type": "command",
             "name": "jev-before-agent",
             "command": "python3 \"${extensionPath}/scripts/jev_hook.py\"",
-            "timeout": 8000,
+            "timeout": 12000,
             "description": "Jev policy gate: refuse unsafe requests and nudge broad requests to plan first"
           }
         ]

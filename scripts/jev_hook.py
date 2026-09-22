@@ -696,6 +696,12 @@ HANDLERS = {
 }
 
 
+def short_reason(error: object, limit: int = 120) -> str:
+    """One compact line explaining why Jev could not be reached."""
+    text = " ".join(str(error).split())
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
 def emit(payload: dict[str, Any] | None) -> None:
     if payload is None:
         return
@@ -719,7 +725,9 @@ def run(event: dict[str, Any]) -> dict[str, Any] | None:
         print(f"JEV unavailable ({name}): {error}", file=sys.stderr)
         if name == "BeforeTool":
             return _tool_failure(config["before_tool"], str(error))
-        return allow_payload("JEV unavailable; allowed without the quality gate")
+        return allow_payload(
+            f"JEV unavailable ({short_reason(error)}); allowed without the quality gate"
+        )
     except Exception as error:  # noqa: BLE001 - a hook must never break the CLI
         print(f"JEV hook error ({name}): {error!r}", file=sys.stderr)
         return allow_payload("JEV error; allowed without the quality gate")

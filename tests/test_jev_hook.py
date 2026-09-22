@@ -588,6 +588,39 @@ class ConfidencePolicyTests(unittest.TestCase):
         self.assertEqual(record["danger_probabilities"]["3"], 0.9)
 
 
+class FailOpenTests(unittest.TestCase):
+    """When Jev cannot be reached the reason must be visible in the UI message."""
+
+    def test_unreachable_jev_reports_the_reason(self) -> None:
+        import socket
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+        probe.close()
+
+        payload, result = run_hook(
+            before_agent("refactor the query layer"),
+            events=["BeforeAgent"],
+            env_extra={"TYPESAFE_API_URL": f"http://127.0.0.1:{dead_port}/v1/systemone"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["decision"], "allow")
+        self.assertIn("JEV unavailable (", payload["systemMessage"])
+        self.assertIn("refused", payload["systemMessage"].lower())
+
+    def test_timeout_keeps_the_session_usable(self) -> None:
+        payload, result = run_hook(
+            session_start(),
+            events=["SessionStart"],
+            config={"timeouts": {"SessionStart": 0.5}},
+            env_extra={"TYPESAFE_API_URL": "http://10.255.255.1:81/v1/systemone"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["decision"], "allow")
+        self.assertIn("JEV unavailable (", payload["systemMessage"])
+
+
 class SelectionTests(unittest.TestCase):
     def test_unselected_event_is_a_silent_no_op(self) -> None:
         # hooks.json may declare every event (for instance after an extension

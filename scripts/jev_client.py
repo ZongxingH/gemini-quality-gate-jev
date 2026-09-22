@@ -39,7 +39,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "timeouts": {
         "AfterAgent": 5.0,
         "BeforeTool": 3.0,
-        "BeforeAgent": 4.0,
+        "BeforeAgent": 6.0,
         "SessionStart": 5.0,
     },
     "thresholds": {
