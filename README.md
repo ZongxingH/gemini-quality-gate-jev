@@ -51,13 +51,13 @@ Jev 只回答判断，不生成代码或文字。安装时自己选要挂哪几�
 
 ## 安装
 
-一条命令（只用 `github.com`，参数照抄改值即可）：
+一条命令（只用 `github.com`，参数照抄改值即可；`rm -rf` 那半句是让它可以重复执行）：
 
 ```bash
-git clone --depth 1 https://github.com/ZongxingH/gemini-quality-gate-jev.git /tmp/jev-gqg && bash /tmp/jev-gqg/install.sh --global --events all --api-key ts_xxxxxxxx
+rm -rf /tmp/jev-gqg && git clone --depth 1 https://github.com/ZongxingH/gemini-quality-gate-jev.git /tmp/jev-gqg && bash /tmp/jev-gqg/install.sh --global --events all --api-key ts_xxxxxxxx
 ```
 
-克隆只会做一次；之后改门、指定项目、更新、卸载都用同一个脚本：
+克隆完成后，改门、指定项目、更新、卸载都用同一个脚本：
 
 ```bash
 bash /tmp/jev-gqg/install.sh --global                          # 全局启用 + 交互选门
