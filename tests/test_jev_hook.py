@@ -62,11 +62,18 @@ def run_hook(
     write_config: bool = True,
     env_extra: dict | None = None,
     fail_first: int = 0,
+    rate_limit_first: int = 0,
+    retry_after: str = "0",
     timeout: float = 20.0,
 ):
     """Run the hook as Gemini CLI would and return (payload, completed)."""
     assert SERVER is not None and WORKDIR is not None
-    SERVER.reset(answers or {}, fail_first=fail_first)
+    SERVER.reset(
+        answers or {},
+        fail_first=fail_first,
+        rate_limit_first=rate_limit_first,
+        retry_after=retry_after,
+    )
 
     home = Path(tempfile.mkdtemp(prefix="jev-home-"))
     config_path = home / "jev.json"
@@ -632,6 +639,31 @@ class FailOpenTests(unittest.TestCase):
         self.assertEqual(payload["decision"], "allow")
         self.assertIn("JEV unavailable (", payload["systemMessage"])
         self.assertIn("attempt(s)", payload["systemMessage"])
+
+    def test_rate_limit_is_retried_after_retry_after(self) -> None:
+        # Official SDK behaviour: a 429 is retried with backoff, honouring
+        # Retry-After. Bounded by the hook budget, so keep it at 0 seconds here.
+        payload, result = run_hook(
+            session_start(),
+            answers={"repo_risk": {"score": 2.9, "confidence": 0.95}, "verification_burden": {"noul": 0.2}},
+            events=["SessionStart"],
+            rate_limit_first=1,
+            retry_after="0",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("additionalContext", payload.get("hookSpecificOutput", {}))
+
+    def test_oversized_retry_after_fails_fast(self) -> None:
+        payload, result = run_hook(
+            session_start(),
+            answers={"repo_risk": {"score": 2.9, "confidence": 0.95}, "verification_burden": {"noul": 0.2}},
+            events=["SessionStart"],
+            rate_limit_first=1,
+            retry_after="60",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["decision"], "allow")
+        self.assertIn("rate limited", payload["systemMessage"])
 
     def test_timeout_keeps_the_session_usable(self) -> None:
         payload, result = run_hook(

@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
+
+#: The versioned model that answered the latest request (the response carries
+#: it, and an alias like ``jev-latest`` may move between releases).
+ANSWERS_MODEL: list[str | None] = [None]
 DEFAULT_MODEL = "jev-latest"
 
 MAX_STATE_CHARS = 12000
@@ -127,6 +131,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # connection of a session is slow. 0 keeps every hook within one timeout.
     "retries": 0,
     "retry_delay_seconds": 0.3,
+    # The official SDKs retry 429 with backoff and honour Retry-After. Keep that
+    # behaviour independent of 'retries', but never sleep past the hook budget.
+    "rate_limit_retries": 1,
+    "rate_limit_max_wait_seconds": 2.0,
     # Retries may use a shorter timeout than the first attempt, so a stalled
     # first connection does not double the worst-case wait.
     "retry_timeout_seconds": 8,
@@ -135,6 +143,32 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # from real traffic later.
     "log_decisions": False,
 }
+
+
+def _retry_after_seconds(error: urllib.error.HTTPError, default: float) -> float:
+    """Parse the Retry-After header (seconds or HTTP date); default on absence."""
+    raw = None
+    try:
+        raw = error.headers.get("Retry-After") if error.headers else None
+    except AttributeError:
+        raw = None
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(str(raw).strip()))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        import datetime
+
+        when = parsedate_to_datetime(str(raw).strip())
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        delta = (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+        return max(0.0, delta)
+    except (TypeError, ValueError):
+        return default
 
 
 class JevError(RuntimeError):
@@ -344,9 +378,11 @@ def ask_jev(
     if not key:
         raise JevError("no TypeSafe API key configured")
 
+    # The API takes state as a string, object or array; the official SDKs send
+    # the object as-is, so keep the structure instead of pre-serialising it.
     body = {
         "model": os.environ.get("TYPESAFE_MODEL") or config.get("model") or DEFAULT_MODEL,
-        "state": state if isinstance(state, str) else json.dumps(state, ensure_ascii=False),
+        "state": state,
         "questions": questions,
     }
     data = json.dumps(body).encode("utf-8")
@@ -379,28 +415,62 @@ def ask_jev(
     except (TypeError, ValueError):
         retry_timeout = timeout
 
+    try:
+        rate_limit_attempts = max(0, int(config.get("rate_limit_retries") or 0))
+    except (TypeError, ValueError):
+        rate_limit_attempts = 1
+    try:
+        max_rate_limit_wait = max(0.0, float(config.get("rate_limit_max_wait_seconds") or 2.0))
+    except (TypeError, ValueError):
+        max_rate_limit_wait = 2.0
+
     started = time.monotonic()
     payload: Any = None
-    for attempt in range(attempts):
-        attempt_timeout = timeout if attempt == 0 else retry_timeout
+    attempt = 0
+    while True:
+        attempt += 1
+        attempt_timeout = timeout if attempt == 1 else retry_timeout
         try:
             with urllib.request.urlopen(request, timeout=attempt_timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             break
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
-            if attempt + 1 >= attempts:
+        except urllib.error.HTTPError as error:
+            if error.code == 429 and rate_limit_attempts > 0:
+                rate_limit_attempts -= 1
+                wait = _retry_after_seconds(error, default=delay)
+                if wait <= max_rate_limit_wait:
+                    time.sleep(wait)
+                    continue
                 raise JevError(
-                    str(error),
-                    attempts=attempt + 1,
+                    f"rate limited (429); Retry-After {wait:.1f}s exceeds the hook budget",
+                    attempts=attempt,
                     elapsed=time.monotonic() - started,
                 ) from error
-            time.sleep(delay)
+            if attempt < attempts:
+                time.sleep(delay)
+                continue
+            raise JevError(
+                str(error), attempts=attempt, elapsed=time.monotonic() - started
+            ) from error
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+            if attempt < attempts:
+                time.sleep(delay)
+                continue
+            raise JevError(
+                str(error), attempts=attempt, elapsed=time.monotonic() - started
+            ) from error
 
     if not isinstance(payload, dict):
         raise JevError("unexpected response payload")
     answers = payload.get("answers")
     if not isinstance(answers, dict):
         raise JevError("response is missing the answers object")
+
+    # The docs recommend logging which versioned model produced each result,
+    # because an alias can move under you.
+    answering_model = payload.get("model")
+    if isinstance(answering_model, str) and answering_model:
+        ANSWERS_MODEL[0] = answering_model
     return answers
 
 
