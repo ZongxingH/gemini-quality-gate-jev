@@ -76,6 +76,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gat
 bash <(curl -fsSL https://raw.githubusercontent.com/ZongxingH/gemini-quality-gate-jev/main/install.sh) --global --events all --api-key-file ~/keys/jev.env
 ```
 
+> **如果报 `curl: (35) … raw.githubusercontent.com`**（该域名在受限网络里经常连不上），把 URL 换掉即可，参数完全一样：
+>
+> ```bash
+> # jsDelivr 镜像（内容取自同一个仓库，第三方 CDN）
+> bash <(curl -fsSL https://cdn.jsdelivr.net/gh/ZongxingH/gemini-quality-gate-jev@main/install.sh) --global --events all
+>
+> # 或走 GitHub API
+> bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' https://api.github.com/repos/ZongxingH/gemini-quality-gate-jev/contents/install.sh) --global --events all
+> ```
+>
+> 扩展本身仍从 `github.com` 克隆；如果 `github.com` 也不通，就先想办法 `git clone` 到本地，再用 `--repo /path/to/gemini-quality-gate-jev` 安装。
+
 参数说明：
 
 | 参数 | 取值 | 说明 |
