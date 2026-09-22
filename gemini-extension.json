@@ -1,13 +1,5 @@
 {
   "name": "gemini-quality-gate-jev",
-  "version": "0.2.0",
-  "description": "TypeSafe Jev gates for Gemini CLI: one correction pass after each answer, a risk guard before tool calls, a policy check before each request, and a session pre-flight advisory.",
-  "settings": [
-    {
-      "name": "TypeSafe API key",
-      "description": "API key used to call TypeSafe Jev. Optional: the hooks also read ${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env, which install.sh writes.",
-      "envVar": "TYPESAFE_API_KEY",
-      "sensitive": true
-    }
-  ]
+  "version": "0.3.0",
+  "description": "TypeSafe Jev gates for Gemini CLI: one correction pass after each answer, a risk guard before tool calls, a policy check before each request, and a session pre-flight advisory. The Jev API key is read from ${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env (written by install.sh) or the TYPESAFE_API_KEY environment variable."
 }

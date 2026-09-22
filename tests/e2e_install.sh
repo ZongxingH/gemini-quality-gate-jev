@@ -101,6 +101,13 @@ GATE_CONFIG="$(sed -n 's/^Gate conf: //p' "$INSTALL_LOG" | tail -1)"
 check "install reported an extension directory" "$([[ -n "$EXT_DIR" ]] && printf 1 || printf 0)"
 check "extension directory exists" "$([[ -f "$EXT_DIR/gemini-extension.json" ]] && printf 1 || printf 0)" "$EXT_DIR"
 check "gate config written" "$([[ -f "$GATE_CONFIG" ]] && printf 1 || printf 0)" "$GATE_CONFIG"
+if grep -q "missing settings" "$INSTALL_LOG"; then
+  # A declared-but-unset extension setting makes the CLI print this warning,
+  # which reads like a failed install. The manifest must not declare one.
+  check "install output has no 'missing settings' warning" 0 "$(grep -m1 'missing settings' "$INSTALL_LOG")"
+else
+  check "install output has no 'missing settings' warning" 1
+fi
 
 python3 - "$GATE_CONFIG" "$EXT_DIR/hooks/hooks.json" <<'PY' >"$WORK/state.json"
 import json, sys

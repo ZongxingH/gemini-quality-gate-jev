@@ -562,6 +562,11 @@ PY
 # record the current directory in ~/.gemini/trustedFolders.json). The script
 # already asks for the user's consent by being run explicitly, so trust the
 # invocation for this one command instead of editing the user's trust store.
+#
+# --skip-settings keeps the install non-interactive. The extension used to
+# declare a "TypeSafe API key" setting, which made the CLI print a confusing
+# "has missing settings" warning; the manifest no longer declares one (the key
+# lives in the file below), so the flag is only kept for older manifests.
 install_extension_from() {
   local work_dir="$1"
   local -a args
@@ -651,10 +656,6 @@ write_key_file
 
 work_dir="${project_dir:-$PWD}"
 install_extension_from "$work_dir"
-if (( ! dry_run )); then
-  log "note: a warning about the missing 'TypeSafe API key' extension setting is expected;"
-  log "      the hooks read the key from $key_file instead."
-fi
 
 write_gate_config
 prune_installed_hooks
