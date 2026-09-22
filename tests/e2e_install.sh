@@ -182,6 +182,19 @@ check "extension removed" "$([[ -d "$EXT_DIR" ]] && printf 0 || printf 1)"
 check "key file removed" "$([[ -f "$HOME_DIR/.config/typesafe/jev.env" ]] && printf 0 || printf 1)"
 check "gate config removed" "$([[ -f "$GATE_CONFIG" ]] && printf 0 || printf 1)"
 
+printf 'doctor.sh on a healthy install\n'
+HOME="$HOME_DIR" TYPESAFE_API_KEY=ts_e2e XDG_CONFIG_HOME="$HOME_DIR/.config" bash "$SRC/install.sh" --global --events all >"$WORK/install3.log" 2>&1 || true
+if HOME="$HOME_DIR" XDG_CONFIG_HOME="$HOME_DIR/.config" bash "$SRC/doctor.sh" --project "$HOME_DIR" >"$WORK/doctor.log" 2>&1; then
+  check "doctor.sh reports a healthy install" 1
+else
+  check "doctor.sh reports a healthy install" 0 "$(tail -3 "$WORK/doctor.log" | tr '\n' ' ')"
+fi
+if grep -q "FAIL" "$WORK/doctor.log"; then
+  check "doctor.sh output has no failed checks" 0 "$(grep -m1 'FAIL' "$WORK/doctor.log")"
+else
+  check "doctor.sh output has no failed checks" 1
+fi
+
 printf '\n'
 if (( FAILURES == 0 )); then
   printf 'e2e: all checks passed\n'

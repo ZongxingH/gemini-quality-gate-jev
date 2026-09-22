@@ -90,10 +90,18 @@ bash /tmp/jev-gqg/install.sh --uninstall
 
 安装脚本会：读密钥 → 写入 `${XDG_CONFIG_HOME:-~/.config}/typesafe/jev.env`（目录 700、文件 600，不进仓库）→ 从 Git 仓库安装扩展 → 把门的选择写进 `…/typesafe/jev.json` → 按选择裁剪已安装的 `hooks/hooks.json` → 按 `--global`/`--project` 设置启用范围 → 用 `gemini extensions list -o json` 复核。
 
-装完**重启 Gemini CLI**，然后确认：
+装完**重启 Gemini CLI**。想确认装成功了，跑自检（会用本地 mock 跑一次真实 hook，不消耗你的 API 费用）：
 
 ```bash
-gemini extensions list        # 应看到 gemini-quality-gate-jev，enabled
+bash /tmp/jev-gqg/doctor.sh --project /path/to/your/project
+```
+
+它会逐项检查：扩展是否装上、CLI 是否在该目录启用、注册的门与 `jev.json` 是否一致、密钥文件是否存在且权限 600、hook 是否能跑出合法判定。全部通过 exit 0，任一项失败 exit 1。加 `--live` 会再向真实 Jev API 发一次请求，用来验证 key 有效（有极小费用）。
+
+也可以自己看一眼：
+
+```bash
+gemini extensions list        # 应看到 gemini-quality-gate-jev，Enabled (Workspace): true
 cat ~/.config/typesafe/jev.json
 ```
 
