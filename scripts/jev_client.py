@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -40,7 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "AfterAgent": 5.0,
         "BeforeTool": 3.0,
         "BeforeAgent": 6.0,
-        "SessionStart": 5.0,
+        "SessionStart": 12.0,
     },
     "thresholds": {
         # AfterAgent: one correction pass.
@@ -122,6 +123,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # none is reachable (CI, gemini -p, sandboxed runs).
         "ask_fallback": "deny",
     },
+    # Extra attempts per Jev request, for flaky networks where the first
+    # connection of a session is slow. 0 keeps every hook within one timeout.
+    "retries": 0,
+    "retry_delay_seconds": 0.3,
     # Append every decision (with Jev's probabilities) to
     # ~/.config/typesafe/jev-decisions.jsonl so thresholds can be calibrated
     # from real traffic later.
@@ -352,11 +357,26 @@ def ask_jev(
         timeout = float(timeout_env) if timeout_env else float(config.get("_timeout") or 5.0)
     except ValueError:
         timeout = float(config.get("_timeout") or 5.0)
+
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
-        raise JevError(str(error)) from error
+        attempts = 1 + max(0, int(config.get("retries") or 0))
+    except (TypeError, ValueError):
+        attempts = 1
+    try:
+        delay = max(0.0, float(config.get("retry_delay_seconds") or 0.3))
+    except (TypeError, ValueError):
+        delay = 0.3
+
+    payload: Any = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+            if attempt + 1 >= attempts:
+                raise JevError(str(error)) from error
+            time.sleep(delay)
 
     if not isinstance(payload, dict):
         raise JevError("unexpected response payload")

@@ -34,10 +34,18 @@ LOUD_ANSWERS: dict = {
 class MockJev:
     """Canned Jev answers plus a request log."""
 
-    def __init__(self, answers: dict | None = None, port: int = 0, log_path: str | None = None) -> None:
+    def __init__(
+        self,
+        answers: dict | None = None,
+        port: int = 0,
+        log_path: str | None = None,
+        fail_first: int = 0,
+    ) -> None:
         self.requests: list[dict] = []
         self.answers: dict = answers if answers is not None else dict(LOUD_ANSWERS)
         self.log_path = log_path
+        # Drop the first N requests, to exercise retry behaviour.
+        self.fail_first = fail_first
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -57,6 +65,12 @@ class MockJev:
                 if outer.log_path:
                     with open(outer.log_path, "a", encoding="utf-8") as handle:
                         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                if outer.fail_first > 0:
+                    outer.fail_first -= 1
+                    self.send_response(503)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 payload = json.dumps({"model": "jev-test", "answers": outer.answers}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -72,9 +86,10 @@ class MockJev:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
-    def reset(self, answers: dict | None = None) -> None:
+    def reset(self, answers: dict | None = None, fail_first: int = 0) -> None:
         self.requests.clear()
         self.answers = answers if answers is not None else dict(LOUD_ANSWERS)
+        self.fail_first = fail_first
 
     def stop(self) -> None:
         self.server.shutdown()

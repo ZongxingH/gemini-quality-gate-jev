@@ -61,11 +61,12 @@ def run_hook(
     config: dict | None = None,
     write_config: bool = True,
     env_extra: dict | None = None,
+    fail_first: int = 0,
     timeout: float = 20.0,
 ):
     """Run the hook as Gemini CLI would and return (payload, completed)."""
     assert SERVER is not None and WORKDIR is not None
-    SERVER.reset(answers or {})
+    SERVER.reset(answers or {}, fail_first=fail_first)
 
     home = Path(tempfile.mkdtemp(prefix="jev-home-"))
     config_path = home / "jev.json"
@@ -608,6 +609,28 @@ class FailOpenTests(unittest.TestCase):
         self.assertEqual(payload["decision"], "allow")
         self.assertIn("JEV unavailable (", payload["systemMessage"])
         self.assertIn("refused", payload["systemMessage"].lower())
+
+    def test_retry_recovers_from_a_flaky_endpoint(self) -> None:
+        payload, result = run_hook(
+            session_start(),
+            answers={"repo_risk": {"score": 2.9, "confidence": 0.95}, "verification_burden": {"noul": 0.2}},
+            events=["SessionStart"],
+            config={"retries": 1},
+            fail_first=1,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("additionalContext", payload.get("hookSpecificOutput", {}))
+
+    def test_without_retries_a_flaky_endpoint_falls_open(self) -> None:
+        payload, result = run_hook(
+            session_start(),
+            answers={"repo_risk": {"score": 2.9, "confidence": 0.95}, "verification_burden": {"noul": 0.2}},
+            events=["SessionStart"],
+            fail_first=1,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["decision"], "allow")
+        self.assertIn("JEV unavailable (", payload["systemMessage"])
 
     def test_timeout_keeps_the_session_usable(self) -> None:
         payload, result = run_hook(

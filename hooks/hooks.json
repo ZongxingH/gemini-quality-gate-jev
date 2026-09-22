@@ -47,7 +47,7 @@
             "type": "command",
             "name": "jev-session-start",
             "command": "python3 \"${extensionPath}/scripts/jev_hook.py\"",
-            "timeout": 8000,
+            "timeout": 25000,
             "description": "Jev session pre-flight: inject a verification advisory for risky repositories"
           }
         ]

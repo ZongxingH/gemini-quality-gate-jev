@@ -152,8 +152,9 @@ python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_hook.py --print
     "AfterAgent": 5,
     "BeforeTool": 3,
     "BeforeAgent": 6,
-    "SessionStart": 5
+    "SessionStart": 12
   },
+  "retries": 0,
   "thresholds": {
     "after_agent_retry": 0.85,
     "after_agent_risk_hard": 2.5,
@@ -194,7 +195,8 @@ python3 ~/.gemini/extensions/gemini-quality-gate-jev/scripts/jev_hook.py --print
 - `before_tool.fail_mode`：Jev 不可达时 `open`（默认，放行）或 `closed`（拒绝工具调用）。
 - `before_tool.safe_command_prefixes`：本地直接放行的只读命令前缀，默认已含 `ls/cat/grep/git status/git diff/...`。
 - `before_tool.sensitive_path_patterns`：写入这些路径的文件才会送审（`.env`、`.ssh/`、`*.pem`、`credentials` 等）。
-- `timeouts`：每个门单次 Jev 请求的超时（秒）。`BeforeAgent` 是每轮第一个跑的钩子，冷启动更慢，默认给到 6 秒；网络慢可再调大（上限受 `hooks/hooks.json` 里各门的命令超时约束，改完需重跑安装脚本）。
+- `timeouts`：每个门单次 Jev 请求的超时（秒）。首次连接 `api.typesafe.ai` 要付 DNS/TCP/TLS 冷启动成本（受限网络里常见 3–8 秒），所以会话里第一个跑的 `SessionStart` 默认给到 12 秒、`BeforeAgent` 6 秒；网络慢可再调大（上限受 `hooks/hooks.json` 里各门的命令超时约束，改完需重跑安装脚本）。
+- `retries`：单次请求失败后额外重试几次（默认 `0`）。网络抖动明显时设为 `1`~`2` 通常就能救回"会话第一次调用超时"；代价是失败路径的等待时间成倍增加，`retry_delay_seconds` 控制重试间隔（默认 0.3 秒）。
 
 界面上如果看到 `JEV unavailable (原因); allowed without the quality gate`，表示**该门这一轮没调通、按设计放行了**（不是没装、也不是判定通过）；括号里就是真实原因（超时 / 连接被拒 / 401 等）。连续出现说明网络到 `api.typesafe.ai` 不稳，先把 `timeouts` 调大。
 
